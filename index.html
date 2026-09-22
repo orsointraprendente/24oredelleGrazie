@@ -202,73 +202,95 @@
             return `<img src="${url}" alt="${nomeSquadra}" class="${classi}" onerror="this.style.display='none'">`;
         },
 
-       // ----------------------------------------------------------------
-        // 2A — AUTENTICAZIONE
-        // ----------------------------------------------------------------
+// ----------------------------------------------------------------
+// 2A — AUTENTICAZIONE (Supabase Auth)
+// ----------------------------------------------------------------
 
+async init() {
+    const { data: { session } } = await supabase.auth.getSession();
 
-
-        async init() {
-            const arbitri      = await this.caricaArbitri();
-            const emailSalvata = localStorage.getItem('arbitro_email');
-            const utente       = arbitri.find(a => a.email === emailSalvata);
-
-            if (utente) {
-                this.utenteAutenticato = utente.email;
-                this.emailUtente       = utente.email;
-                this.ruoloUtente       = utente.ruolo || 'arbitro';
-                this.arbitriLista      = arbitri;
-                this.sottoscrivi();
-                await this.caricaSqualifiche();
-                await this.caricaSquadre();
-                await this.caricaPartite();
-                this.render();
-            } else {
-                this.renderLogin();
-            }
-        },
-
-        async caricaArbitri() {
-            try {
-                const { data, error } = await supabase.from('arbitri').select('email, nome, ruolo, attivo').eq('attivo', true);
-                if (error) throw error;
-                return data || [];
-            } catch (e) { console.error('Errore caricamento arbitri:', e); return []; }
-        },
-
-        async effettuaLogin(event) {
-            event.preventDefault();
-            const email  = document.getElementById('email-input').value.trim();
-            const arbitri = await this.caricaArbitri();
-            const utente  = arbitri.find(a => a.email === email);
-
-            if (!utente) { alert('❌ Email non autorizzata. Contatta l\'amministratore.'); return; }
-
-            this.utenteAutenticato = email;
-            this.emailUtente       = email;
+    if (session) {
+        const utente = await this._risolviRuolo(session.user.id);
+        if (utente) {
+            this.utenteAutenticato = utente.email;
+            this.emailUtente       = utente.email;
             this.ruoloUtente       = utente.ruolo || 'arbitro';
-            this.arbitriLista      = arbitri;
-            localStorage.setItem('arbitro_email', email);
-
+            this.arbitriLista      = await this.caricaArbitri();
             this.sottoscrivi();
             await this.caricaSqualifiche();
             await this.caricaSquadre();
             await this.caricaPartite();
             this.render();
-        },
+            return;
+        }
+        // Sessione Auth valida ma nessun arbitro collegato: sloggati per sicurezza
+        await supabase.auth.signOut();
+    }
 
-        logout() {
-            if (!confirm('Vuoi effettuare il logout?')) return;
-            localStorage.removeItem('arbitro_email');
-            this.utenteAutenticato = null;
-            this.emailUtente       = '';
-            this.ruoloUtente       = 'arbitro';
-            if (this.timerInterval)     clearInterval(this.timerInterval);
-            if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
-            this.renderLogin();
-        },
+    this.renderLogin();
+},
 
-        isOrganizzatore() { return this.ruoloUtente === 'organizzatore'; },
+/** Cerca in `arbitri` la riga collegata all'utente Auth loggato */
+async _risolviRuolo(userId) {
+    try {
+        const { data, error } = await supabase
+            .from('arbitri')
+            .select('email, nome, ruolo, attivo')
+            .eq('user_id', userId)
+            .eq('attivo', true)
+            .maybeSingle();
+        if (error) throw error;
+        return data || null;
+    } catch (e) { console.error('Errore risoluzione ruolo:', e); return null; }
+},
+
+async caricaArbitri() {
+    try {
+        const { data, error } = await supabase.from('arbitri').select('email, nome, ruolo, attivo').eq('attivo', true);
+        if (error) throw error;
+        return data || [];
+    } catch (e) { console.error('Errore caricamento arbitri:', e); return []; }
+},
+
+async effettuaLogin(event) {
+    event.preventDefault();
+    const email    = document.getElementById('email-input').value.trim();
+    const password = document.getElementById('password-input').value;
+
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) { alert('❌ Email o password errati.'); return; }
+
+    const utente = await this._risolviRuolo(data.user.id);
+    if (!utente) {
+        alert('❌ Il tuo account non è collegato a nessun arbitro. Contatta l\'amministratore.');
+        await supabase.auth.signOut();
+        return;
+    }
+
+    this.utenteAutenticato = utente.email;
+    this.emailUtente       = utente.email;
+    this.ruoloUtente       = utente.ruolo || 'arbitro';
+    this.arbitriLista      = await this.caricaArbitri();
+
+    this.sottoscrivi();
+    await this.caricaSqualifiche();
+    await this.caricaSquadre();
+    await this.caricaPartite();
+    this.render();
+},
+
+async logout() {
+    if (!confirm('Vuoi effettuare il logout?')) return;
+    await supabase.auth.signOut();
+    this.utenteAutenticato = null;
+    this.emailUtente       = '';
+    this.ruoloUtente       = 'arbitro';
+    if (this.timerInterval)     clearInterval(this.timerInterval);
+    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+    this.renderLogin();
+},
+
+isOrganizzatore() { return this.ruoloUtente === 'organizzatore'; },
 
         /* ----------------------------------------------------------------
            2B — SQUADRE
@@ -1490,15 +1512,20 @@ async inviaRefertoTelegram(id) {
                             <p class="text-gray-400">Gestionale Arbitri</p>
                         </div>
                         <form onsubmit="app.effettuaLogin(event)" class="space-y-4">
-                            <div>
-                                <label class="block text-sm mb-2 text-gray-300">Email</label>
-                                <input type="email" id="email-input" placeholder="arbitro@24odg.it"
-                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-3 text-white focus:border-cyan-500 focus:outline-none" required>
-                            </div>
-                            <button type="submit" class="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-3 px-4 rounded mt-6">
-                                🔒 Accedi
-                            </button>
-                        </form>
+    <div>
+        <label class="block text-sm mb-2 text-gray-300">Email</label>
+        <input type="email" id="email-input" placeholder="arbitro@24odg.it"
+            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-3 text-white focus:border-cyan-500 focus:outline-none" required>
+    </div>
+    <div>
+        <label class="block text-sm mb-2 text-gray-300">Password</label>
+        <input type="password" id="password-input" placeholder="••••••••"
+            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-3 text-white focus:border-cyan-500 focus:outline-none" required>
+    </div>
+    <button type="submit" class="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-3 px-4 rounded mt-6">
+        🔒 Accedi
+    </button>
+</form>
                         <div class="mt-6 p-4 bg-blue-900 bg-opacity-30 border border-blue-700 rounded-lg">
                             <p class="text-xs text-blue-300"><span class="font-bold">ℹ️ Nota:</span> Solo arbitri autorizzati possono accedere.</p>
                         </div>
