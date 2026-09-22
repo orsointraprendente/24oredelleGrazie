@@ -1,0 +1,2381 @@
+<!DOCTYPE html>
+<!--
+  ========================================================================
+  Applicazione 24OdG - Gestionale Arbitri
+  Copyright (C) 2026 - Tutti i diritti d'autore riservati a 24OredelleGrazie
+  Licenza: GNU General Public License v3.0 (GPLv3)
+  ========================================================================
+  STRUTTURA (unire in ordine):
+    PARTE 1 → HTML, CSS, Audio, Configurazione, Stato app
+    PARTE 2 → Logica: database, timer, partite, squadre, statistiche
+    PARTE 3 → Render: interfacce utente
+  ========================================================================
+-->
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0e7490">
+    <title>24OdG - Gestionale Arbitri</title>
+
+    <!-- PWA / Icone -->
+    <link rel="manifest"        href="./manifest.json">
+    <link rel="apple-touch-icon"                        href="./icon-192.png">
+    <link rel="icon" type="image/png" sizes="192x192"   href="./icon-192.png">
+    <link rel="icon" type="image/png" sizes="512x512"   href="./icon-512.png">
+    <link rel="shortcut icon"                           href="./favicon.ico">
+
+    <!-- Librerie esterne -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+    <!-- ================================================================
+         CSS PERSONALIZZATO
+         ================================================================ -->
+    <style>
+        @keyframes pulse-red {
+            0%, 100% { opacity: 1; }
+            50%       { opacity: 0.5; }
+        }
+        .timer-active { animation: pulse-red 1.5s ease-in-out infinite; }
+        .progress-bar { transition: width 0.3s ease; }
+    </style>
+
+    <!-- ================================================================
+         AUDIO
+         ================================================================ -->
+ <script>
+    /** AudioContext condiviso, creato una volta sola */
+    let _audioCtx = null;
+
+    function getAudioCtx() {
+        if (!_audioCtx) {
+            _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (_audioCtx.state === 'suspended') {
+            _audioCtx.resume();
+        }
+        return _audioCtx;
+    }
+
+    /** Sblocca l'audio al primo tocco dell'utente */
+    document.addEventListener('touchstart', function unlockAudio() {
+        getAudioCtx();
+        document.removeEventListener('touchstart', unlockAudio);
+    }, { once: true });
+
+    document.addEventListener('click', function unlockAudioClick() {
+        getAudioCtx();
+        document.removeEventListener('click', unlockAudioClick);
+    }, { once: true });
+
+    /** Beep breve (880 Hz) — ultimi 15 secondi */
+    function creaBeep() {
+        try {
+            const ctx = getAudioCtx();
+            const osc = ctx.createOscillator(), gain = ctx.createGain();
+            osc.connect(gain); gain.connect(ctx.destination);
+            osc.frequency.value = 880; osc.type = 'sine';
+            gain.gain.setValueAtTime(0.3, ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+            osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.15);
+        } catch(e) { console.log('Errore beep:', e); }
+    }
+
+    /** Fischio lungo (2000 Hz) — fine tempo */
+    function creaFischio() {
+        try {
+            const ctx = getAudioCtx();
+            const osc = ctx.createOscillator(), gain = ctx.createGain();
+            osc.connect(gain); gain.connect(ctx.destination);
+            osc.frequency.value = 2000; osc.type = 'sine';
+            gain.gain.setValueAtTime(0.5, ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.8);
+            osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.8);
+        } catch(e) { console.log('Errore fischio:', e); }
+    }
+
+    /** Doppio beep (660 Hz) — 1 minuto alla fine */
+    function creaAvvisoMinuto() {
+        try {
+            const ctx = getAudioCtx();
+            [0, 0.35].forEach(delay => {
+                const osc = ctx.createOscillator(), gain = ctx.createGain();
+                osc.connect(gain); gain.connect(ctx.destination);
+                osc.frequency.value = 660; osc.type = 'sine';
+                gain.gain.setValueAtTime(0.4, ctx.currentTime + delay);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + 0.25);
+                osc.start(ctx.currentTime + delay); osc.stop(ctx.currentTime + delay + 0.25);
+            });
+        } catch(e) { console.log('Errore avviso minuto:', e); }
+    }
+</script>
+</head>
+
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <div id="app"></div>
+
+    <script type="module">
+        import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0/+esm';
+
+        /* ----------------------------------------------------------------
+           CONFIGURAZIONE SUPABASE
+           ---------------------------------------------------------------- */
+        const SUPABASE_URL = 'https://axelfpfxtvnbvnzoqcwz.supabase.co';
+        const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4ZWxmcGZ4dHZuYnZuem9xY3d6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwOTUwODAsImV4cCI6MjEwNTY3MTA4MH0.4X0oVJCxTVAqvNFBui_MO_QvcMgdNzFmN9-Z3dTcg-o';
+        const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+        window.supabase = supabase;
+
+/* ----------------------------------------------------------------
+           CONFIGURAZIONE TELEGRAM
+           ---------------------------------------------------------------- */
+
+      
+        /* ----------------------------------------------------------------
+           COSTANTI
+           ---------------------------------------------------------------- */
+        const TIMEOUT_ARBITRO     = 30000; // ms
+        const HEARTBEAT_INTERVAL  = 10000; // ms
+        const MAX_RECUPERO_MINUTI = 10;
+        const DURATA_TEMPO_STD    = 900;   // 15 min
+        const DURATA_TEMPO_EXTRA  = 300;   // 5 min (Silver/Golden)
+        const LIMITE_VUOTI_STD    = 3;
+        const LIMITE_VUOTI_EXTRA  = 2;
+        const SOGLIA_FALLO_VUOTI  = 14;
+        const FALLI_PER_META      = 3;
+
+        /* ----------------------------------------------------------------
+           STATO GLOBALE
+           ---------------------------------------------------------------- */
+        window.app = {
+
+            // Dati
+            partite:    [],
+            squadre:    {},
+            squalifiche: [],
+            arbitriLista: [], // lista completa arbitri (per admin e assegnazioni)
+
+            // Connessione
+            connesso: false,
+
+            // Navigazione
+            vista:              'partite',
+            sottovista:         'tutte',
+            partitaSelezionata: null,
+            filtroCampo:        'tutti',
+            filtroOrario:       'tutti',
+
+            // Utente
+            utenteAutenticato: null,
+            emailUtente:       '',
+            ruoloUtente:       'arbitro', // 'arbitro' | 'organizzatore'
+
+            // Timer
+            timerInterval:     null,
+            heartbeatInterval: null,
+
+            // Flag audio
+            avvisoMinutoSuonato:        false,
+            fischioPrimoTempoSuonato:   false,
+            fischioSecondoTempoSuonato: false,
+
+            // =========================================================
+            // PARTE 2 e PARTE 3 vengono incollate qui sotto, in ordine
+            // =========================================================
+
+          // =============================================================
+        // PARTE 2 — LOGICA APPLICAZIONE
+        // =============================================================
+
+        // ----------------------------------------------------------------
+        // HELPER LOGHI
+        // ----------------------------------------------------------------
+
+        logoSquadra(nomeSquadra) {
+            const nomeFile = encodeURIComponent(nomeSquadra);
+            return `${SUPABASE_URL}/storage/v1/object/public/loghi/${nomeFile}.png`;
+        },
+
+        imgLogo(nomeSquadra, classi = 'w-8 h-8 object-contain rounded') {
+            const url = this.logoSquadra(nomeSquadra);
+            return `<img src="${url}" alt="${nomeSquadra}" class="${classi}" onerror="this.style.display='none'">`;
+        },
+
+       // ----------------------------------------------------------------
+        // 2A — AUTENTICAZIONE
+        // ----------------------------------------------------------------
+
+
+
+        async init() {
+            const arbitri      = await this.caricaArbitri();
+            const emailSalvata = localStorage.getItem('arbitro_email');
+            const utente       = arbitri.find(a => a.email === emailSalvata);
+
+            if (utente) {
+                this.utenteAutenticato = utente.email;
+                this.emailUtente       = utente.email;
+                this.ruoloUtente       = utente.ruolo || 'arbitro';
+                this.arbitriLista      = arbitri;
+                this.sottoscrivi();
+                await this.caricaSqualifiche();
+                await this.caricaSquadre();
+                await this.caricaPartite();
+                this.render();
+            } else {
+                this.renderLogin();
+            }
+        },
+
+        async caricaArbitri() {
+            try {
+                const { data, error } = await supabase.from('arbitri').select('email, nome, ruolo, attivo').eq('attivo', true);
+                if (error) throw error;
+                return data || [];
+            } catch (e) { console.error('Errore caricamento arbitri:', e); return []; }
+        },
+
+        async effettuaLogin(event) {
+            event.preventDefault();
+            const email  = document.getElementById('email-input').value.trim();
+            const arbitri = await this.caricaArbitri();
+            const utente  = arbitri.find(a => a.email === email);
+
+            if (!utente) { alert('❌ Email non autorizzata. Contatta l\'amministratore.'); return; }
+
+            this.utenteAutenticato = email;
+            this.emailUtente       = email;
+            this.ruoloUtente       = utente.ruolo || 'arbitro';
+            this.arbitriLista      = arbitri;
+            localStorage.setItem('arbitro_email', email);
+
+            this.sottoscrivi();
+            await this.caricaSqualifiche();
+            await this.caricaSquadre();
+            await this.caricaPartite();
+            this.render();
+        },
+
+        logout() {
+            if (!confirm('Vuoi effettuare il logout?')) return;
+            localStorage.removeItem('arbitro_email');
+            this.utenteAutenticato = null;
+            this.emailUtente       = '';
+            this.ruoloUtente       = 'arbitro';
+            if (this.timerInterval)     clearInterval(this.timerInterval);
+            if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+            this.renderLogin();
+        },
+
+        isOrganizzatore() { return this.ruoloUtente === 'organizzatore'; },
+
+        /* ----------------------------------------------------------------
+           2B — SQUADRE
+           ---------------------------------------------------------------- */
+
+        async caricaSquadre() {
+            try {
+                const { data, error } = await supabase.from('squadre').select('*');
+                if (error) throw error;
+                this.squadre = {};
+                data.forEach(row => {
+                    if (!this.squadre[row.nome_squadra]) this.squadre[row.nome_squadra] = [];
+                    this.squadre[row.nome_squadra].push({ numero: row.numero, nome: row.nome_giocatore });
+                });
+            } catch (e) { console.error('Errore caricamento squadre:', e); }
+        },
+
+        async salvaSquadre() {
+            try {
+                await supabase.from('squadre').delete().neq('id', 0);
+                const rows = [];
+                Object.keys(this.squadre).forEach(sq => {
+                    this.squadre[sq].forEach(g => rows.push({ nome_squadra: sq, numero: g.numero, nome_giocatore: g.nome }));
+                });
+                if (rows.length > 0) await supabase.from('squadre').insert(rows);
+            } catch (e) { console.error('Errore salvataggio squadre:', e); }
+        },
+
+        aggiungiSquadraManuale() {
+            if (!this.isOrganizzatore()) return;
+            const nome = prompt('Nome della squadra:');
+            if (!nome) return;
+            const giocatori = [];
+            let continua = true;
+            while (continua) {
+                const numero = prompt(`Squadra: ${nome}\nNumero maglia (lascia vuoto per terminare):`);
+                if (!numero) break;
+                const ng = prompt(`Squadra: ${nome}\nNome del giocatore n. ${numero}:`);
+                if (!ng) break;
+                giocatori.push({ numero: parseFloat(numero), nome: ng });
+                continua = confirm('Aggiungere un altro giocatore?');
+            }
+            if (giocatori.length > 0) {
+                this.squadre[nome] = giocatori;
+                this.salvaSquadre();
+                alert(`✓ Squadra "${nome}" aggiunta con ${giocatori.length} giocatori!`);
+                this.render();
+            }
+        },
+
+        importaSquadre() {
+            if (!this.isOrganizzatore()) return;
+            const url = prompt('Link Google Sheets (3 colonne: Squadra, Numero, Nome):');
+            if (!url) return;
+            let csvUrl = url;
+            if (url.includes('/edit')) {
+                const id = url.match(/\/d\/([a-zA-Z0-9-_]+)/)[1];
+                csvUrl = `https://docs.google.com/spreadsheets/d/${id}/export?format=csv`;
+            }
+            fetch(csvUrl).then(r => r.text()).then(csv => {
+                Papa.parse(csv, { header: true, skipEmptyLines: true, complete: (res) => {
+                    res.data.forEach(row => {
+                        const sq  = row.Squadra || row.squadra;
+                        const numStr = (row.Numero ?? row.numero ?? '').toString().replace(',', '.');
+                        const num = parseFloat(numStr);
+                        const ng  = row.Nome || row.nome;
+                        if (sq && !isNaN(num) && ng) {
+                            if (!this.squadre[sq]) this.squadre[sq] = [];
+                            if (!this.squadre[sq].some(g => g.numero === num && g.nome === ng))
+                                this.squadre[sq].push({ numero: num, nome: ng });
+                        }
+                    });
+                    this.salvaSquadre();
+                    alert(`✓ Importate ${Object.keys(this.squadre).length} squadre!`);
+                    this.render();
+                }});
+            }).catch(() => alert('✗ Errore import. Verifica che il link sia pubblico.'));
+        },
+
+        /* ----------------------------------------------------------------
+           2C — PARTITE
+           ---------------------------------------------------------------- */
+
+        /** Mappa una riga DB in un oggetto partita locale */
+        _mappaRigaPartita(row) {
+            return {
+                id:               row.id,
+                campo:            row.campo            || 1,
+                orario:           row.orario            || '',
+                squadraA:         row.squadra_a,
+                squadraB:         row.squadra_b,
+                golA:             row.gol_a             || [],
+                golB:             row.gol_b             || [],
+                scalpiA:          row.scalpi_a          || [],
+                scalpiB:          row.scalpi_b          || [],
+                vuotiA:           row.vuoti_a           || [],
+                vuotiB:           row.vuoti_b           || [],
+                espulsiA:         row.espulsi_a         || [],
+                espulsiB:         row.espulsi_b         || [],
+                cartelliniA:      row.cartellini_a      || [],
+                cartelliniB:      row.cartellini_b      || [],
+                punteggioA:       row.punteggio_a       || 0,
+                punteggioB:       row.punteggio_b       || 0,
+                puntiA:           row.punti_a           || 0,
+                puntiB:           row.punti_b           || 0,
+                mvpA:             row.mvp_a             || '',
+                mvpB:             row.mvp_b             || '',
+                completata:       row.completata        || false,
+                timerSecondi:     row.timer_secondi     || 0,
+                timerTempo:       row.timer_tempo       || 1,
+                timerAttivo:      row.timer_attivo      || false,
+                timerTimestamp:   row.timer_timestamp   || 0,
+                recupero1Tempo:   row.recupero_1tempo   || 0,
+                recupero2Tempo:   row.recupero_2tempo   || 0,
+                arbitroAttivo:    row.arbitro_attivo    || '',
+                arbitroTimestamp: row.arbitro_timestamp || 0,
+                arbitroAssegnato: row.arbitro_assegnato || '',
+                falliDifesaA:     row.falli_difesa_a    || 0,
+                falliDifesaB:     row.falli_difesa_b    || 0,
+                falliDifesaTotA:  row.falli_difesa_tot_a || 0,
+		falliDifesaTotB:  row.falli_difesa_tot_b || 0,
+                vuotiSquadraA:    row.vuoti_squadra_a   || 0,
+                vuotiSquadraB:    row.vuoti_squadra_b   || 0,
+            };
+        },
+
+        async caricaPartite() {
+            try {
+                const { data, error } = await supabase.from('partite').select('*')
+                    .order('orario', { ascending: true }).order('campo', { ascending: true });
+                if (error) throw error;
+                this.partite = data.map(r => this._mappaRigaPartita(r));
+                this.connesso = true;
+                this.sincronizzaTimer();
+            } catch (e) { console.error('Errore caricamento partite:', e); this.connesso = false; }
+        },
+
+        sottoscrivi() {
+            supabase.channel('db-changes')
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'partite' }, async (payload) => {
+                    const nuovi  = payload.new || {};
+                    const vecchi = payload.old || {};
+                    const cambiati    = Object.keys(nuovi).filter(k => nuovi[k] !== vecchi[k]);
+                    const soloHeartbeat = cambiati.every(k => k === 'arbitro_timestamp' || k === 'arbitro_attivo');
+                    if (soloHeartbeat) return;
+
+                    if (payload.eventType === 'UPDATE' && nuovi.id) {
+                        const idx = this.partite.findIndex(x => x.id === nuovi.id);
+                        if (idx !== -1) {
+                            this.partite[idx] = this._mappaRigaPartita(nuovi);
+                            this.sincronizzaTimer();
+                            this.render();
+                            return;
+                        }
+                    }
+                    await this.caricaPartite();
+                    this.render();
+                }).subscribe();
+        },
+
+        async aggiungiPartita(campo, orario, squadraA, squadraB) {
+            try {
+                const { error } = await supabase.from('partite').insert([{
+                    campo, orario, squadra_a: squadraA, squadra_b: squadraB,
+                    gol_a: [], gol_b: [], scalpi_a: [], scalpi_b: [],
+                    vuoti_a: [], vuoti_b: [], espulsi_a: [], espulsi_b: [],
+                    cartellini_a: [], cartellini_b: [],
+                    punteggio_a: 0, punteggio_b: 0, punti_a: 0, punti_b: 0,
+                    mvp_a: '', mvp_b: '', completata: false,
+                    timer_secondi: 0, timer_tempo: 1, timer_attivo: false, timer_timestamp: 0,
+                    recupero_1tempo: 0, recupero_2tempo: 0,
+                    arbitro_attivo: '', arbitro_timestamp: 0, arbitro_assegnato: '',
+                    falli_difesa_a: 0, falli_difesa_b: 0, vuoti_squadra_a: 0, vuoti_squadra_b: 0,
+                }]);
+                if (error) throw error;
+            } catch (e) { alert('Errore aggiunta partita: ' + e.message); }
+        },
+
+        async aggiornaPartita(id, updates) {
+            try {
+                const p = this.partite.find(x => x.id === id);
+                const u = { ...p, ...updates };
+                const db = {
+                    squadra_a: u.squadraA, squadra_b: u.squadraB,
+                    gol_a: u.golA, gol_b: u.golB,
+                    scalpi_a: u.scalpiA, scalpi_b: u.scalpiB,
+                    vuoti_a: u.vuotiA, vuoti_b: u.vuotiB,
+                    espulsi_a: u.espulsiA, espulsi_b: u.espulsiB,
+                    cartellini_a: u.cartelliniA, cartellini_b: u.cartelliniB,
+                    punteggio_a: u.punteggioA, punteggio_b: u.punteggioB,
+                    punti_a: u.puntiA, punti_b: u.puntiB,
+                    mvp_a: u.mvpA, mvp_b: u.mvpB, completata: u.completata,
+                };
+                if ('timerSecondi'    in updates) db.timer_secondi     = u.timerSecondi;
+                if ('timerTempo'      in updates) db.timer_tempo       = u.timerTempo;
+                if ('timerAttivo'     in updates) db.timer_attivo      = u.timerAttivo;
+                if ('timerTimestamp'  in updates) db.timer_timestamp   = u.timerTimestamp;
+                if ('recupero1Tempo'  in updates) db.recupero_1tempo   = u.recupero1Tempo;
+                if ('recupero2Tempo'  in updates) db.recupero_2tempo   = u.recupero2Tempo;
+                if ('falliDifesaA'    in updates) db.falli_difesa_a    = u.falliDifesaA;
+                if ('falliDifesaB'    in updates) db.falli_difesa_b    = u.falliDifesaB;
+                if ('vuotiSquadraA'   in updates) db.vuoti_squadra_a   = u.vuotiSquadraA;
+                if ('vuotiSquadraB'   in updates) db.vuoti_squadra_b   = u.vuotiSquadraB;
+                if ('arbitroAssegnato' in updates) db.arbitro_assegnato = u.arbitroAssegnato;
+		if ('falliDifesaTotA' in updates) db.falli_difesa_tot_a = u.falliDifesaTotA;
+		if ('falliDifesaTotB' in updates) db.falli_difesa_tot_b = u.falliDifesaTotB;
+
+                const { error } = await supabase.from('partite').update(db).eq('id', id);
+                if (error) throw error;
+                const idx = this.partite.findIndex(x => x.id === id);
+                if (idx !== -1) this.partite[idx] = u;
+                this.render();
+            } catch (e) { console.error('Errore aggiornamento partita:', e); }
+        },
+
+        async salvaPartitaAsync(id, updates) {
+            try {
+                const p = this.partite.find(x => x.id === id);
+                const u = { ...p, ...updates };
+                await supabase.from('partite').update({
+                    gol_a: u.golA, gol_b: u.golB,
+                    scalpi_a: u.scalpiA, scalpi_b: u.scalpiB,
+                    vuoti_a: u.vuotiA, vuoti_b: u.vuotiB,
+                    espulsi_a: u.espulsiA, espulsi_b: u.espulsiB,
+                    cartellini_a: u.cartelliniA, cartellini_b: u.cartelliniB,
+                    punteggio_a: u.punteggioA, punteggio_b: u.punteggioB,
+                    punti_a: u.puntiA, punti_b: u.puntiB,
+                    mvp_a: u.mvpA, mvp_b: u.mvpB, completata: u.completata,
+                    vuoti_squadra_a: u.vuotiSquadraA, vuoti_squadra_b: u.vuotiSquadraB,
+                    falli_difesa_a: u.falliDifesaA, falli_difesa_b: u.falliDifesaB,
+		falli_difesa_tot_a: u.falliDifesaTotA, falli_difesa_tot_b: u.falliDifesaTotB,
+                }).eq('id', id);
+            } catch (e) { console.error('Errore salvataggio asincrono:', e); }
+        },
+
+        async eliminaPartita(id) {
+            if (!confirm('Eliminare questa partita? L\'operazione è irreversibile.')) return;
+            try {
+                const { error } = await supabase.from('partite').delete().eq('id', id);
+                if (error) throw error;
+            } catch (e) { console.error('Errore eliminazione partita:', e); }
+        },
+
+        importaPartite() {
+            if (!this.isOrganizzatore()) return;
+            const url = prompt('Link Google Sheets partite (colonne: Campo, Orario, SquadraA, SquadraB):');
+            if (!url) return;
+            let csvUrl = url;
+            if (url.includes('/edit')) {
+                const id = url.match(/\/d\/([a-zA-Z0-9-_]+)/)[1];
+                csvUrl = `https://docs.google.com/spreadsheets/d/${id}/export?format=csv`;
+            }
+            fetch(csvUrl).then(r => r.text()).then(csv => {
+                Papa.parse(csv, { header: true, skipEmptyLines: true, complete: async (res) => {
+                    let n = 0;
+                    for (const row of res.data) {
+                        const campo    = parseInt(row.Campo || row.campo || '1');
+                        const orario   = row.Orario || row.orario || '';
+                        const squadraA = (row.SquadraA || row['Squadra A'] || '').trim();
+                        const squadraB = (row.SquadraB || row['Squadra B'] || '').trim();
+                        if (!squadraA || !squadraB) continue;
+                        await this.aggiungiPartita(campo, orario, squadraA, squadraB);
+                        n++;
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+                    alert(`✓ Importate ${n} partite!`);
+                }});
+            }).catch(() => alert('✗ Errore import partite.'));
+        },
+
+        /* ----------------------------------------------------------------
+           2D — CONTROLLO ESCLUSIVO + ASSEGNAZIONE
+           ---------------------------------------------------------------- */
+
+        /** Verifica se l'utente corrente può accedere alla partita */
+        _puoAccedere(p) {
+            if (this.isOrganizzatore()) return true;
+            if (!p.arbitroAssegnato) return true; // nessuno assegnato = tutti possono
+            return p.arbitroAssegnato === this.emailUtente;
+        },
+
+        async prelevaControlloPartita(id) {
+            const p = this.partite.find(x => x.id === id);
+            if (!p) return false;
+
+            if (!this._puoAccedere(p)) {
+                alert(`🔒 Questa partita è assegnata a ${p.arbitroAssegnato}.\n\nSolo quell'arbitro o un organizzatore può gestirla.`);
+                return false;
+            }
+
+            const ora = Date.now();
+            if (p.arbitroAttivo && p.arbitroAttivo !== this.emailUtente && (ora - p.arbitroTimestamp) < TIMEOUT_ARBITRO) {
+                const s = Math.ceil((TIMEOUT_ARBITRO - (ora - p.arbitroTimestamp)) / 1000);
+                alert(`⚠️ ${p.arbitroAttivo} sta gestendo questa partita.\n\nRiprova tra ${s} secondi.`);
+                return false;
+            }
+
+            try {
+                await supabase.from('partite').update({ arbitro_attivo: this.emailUtente, arbitro_timestamp: ora }).eq('id', id);
+                if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+                this.heartbeatInterval = setInterval(() => this.inviaHeartbeat(id), HEARTBEAT_INTERVAL);
+                return true;
+            } catch (e) { console.error('Errore acquisizione controllo:', e); return false; }
+        },
+
+        async inviaHeartbeat(id) {
+            if (!this.partitaSelezionata || this.partitaSelezionata !== id) {
+                clearInterval(this.heartbeatInterval); this.heartbeatInterval = null; return;
+            }
+            try { await supabase.from('partite').update({ arbitro_timestamp: Date.now() }).eq('id', id); }
+            catch (e) { console.error('Errore heartbeat:', e); }
+        },
+
+        async rilasciaControlloPartita(id) {
+            if (this.heartbeatInterval) { clearInterval(this.heartbeatInterval); this.heartbeatInterval = null; }
+            try { await supabase.from('partite').update({ arbitro_attivo: '', arbitro_timestamp: 0 }).eq('id', id); }
+            catch (e) { console.error('Errore rilascio controllo:', e); }
+        },
+
+        async apriPartita(id) {
+            const controllo = await this.prelevaControlloPartita(id);
+            if (!controllo) return;
+            this.partitaSelezionata = id;
+            this.sincronizzaTimer();
+            this.render();
+        },
+
+        /** Assegna una partita a un arbitro specifico (solo organizzatori) */
+        async assegnaArbitro(partitaId, emailArbitro) {
+            try {
+                const { error } = await supabase.from('partite')
+                    .update({ arbitro_assegnato: emailArbitro }).eq('id', partitaId);
+                if (error) throw error;
+                const idx = this.partite.findIndex(x => x.id === partitaId);
+                if (idx !== -1) this.partite[idx].arbitroAssegnato = emailArbitro;
+                this.render();
+            } catch (e) { alert('Errore assegnazione arbitro: ' + e.message); }
+        },
+
+        /* ----------------------------------------------------------------
+           2E — TIMER
+           ---------------------------------------------------------------- */
+
+        async avviaTimer(id) {
+            const p = this.partite.find(x => x.id === id);
+            if (!p) return;
+            const controllo = await this.prelevaControlloPartita(id);
+            if (!controllo) return;
+            this.partitaSelezionata        = id;
+            this.avvisoMinutoSuonato       = false;
+            this.fischioPrimoTempoSuonato  = false;
+            this.fischioSecondoTempoSuonato = false;
+            await this.aggiornaPartita(id, { timerAttivo: true, timerTimestamp: Date.now() });
+            this.sincronizzaTimer();
+        },
+
+        async pausaTimer(id) {
+            const p = this.partite.find(x => x.id === id);
+            if (!p) return;
+            const elapsed = Math.floor((Date.now() - p.timerTimestamp) / 1000);
+            await this.aggiornaPartita(id, { timerSecondi: p.timerSecondi + elapsed, timerAttivo: false, timerTimestamp: Date.now() });
+            if (this.timerInterval) { clearInterval(this.timerInterval); this.timerInterval = null; }
+        },
+
+        async fermaTimer(id) {
+            await this.aggiornaPartita(id, { timerSecondi: 0, timerTempo: 1, timerAttivo: false, timerTimestamp: 0 });
+            if (this.timerInterval) { clearInterval(this.timerInterval); this.timerInterval = null; }
+        },
+
+        async aggiungiRecupero(id, minuti) {
+            const p = this.partite.find(x => x.id === id);
+            if (!p) return;
+            const campo       = p.timerTempo === 1 ? 'recupero1Tempo' : 'recupero2Tempo';
+            const nuovoRecupero = (p[campo] || 0) + minuti;
+            if (nuovoRecupero > MAX_RECUPERO_MINUTI) { alert(`⚠️ Recupero massimo: ${MAX_RECUPERO_MINUTI} minuti per tempo`); return; }
+            await this.aggiornaPartita(id, { [campo]: nuovoRecupero });
+            alert(`✓ Aggiunti ${minuti}' di recupero (Tot: ${nuovoRecupero}')`);
+        },
+
+        sincronizzaTimer() {
+            if (this.timerInterval) clearInterval(this.timerInterval);
+            if (!this.partitaSelezionata) return;
+            const p = this.partite.find(x => x.id === this.partitaSelezionata);
+            if (!p || !p.timerAttivo) return;
+            if (p.timerSecondi < 5) {
+                this.avvisoMinutoSuonato = this.fischioPrimoTempoSuonato = this.fischioSecondoTempoSuonato = false;
+            }
+            const elapsed = Math.floor((Date.now() - p.timerTimestamp) / 1000);
+            this.aggiornaTimerDisplay(p.timerSecondi + elapsed, p.timerTempo);
+            this.timerInterval = setInterval(() => this.aggiornaTimerLocale(), 1000);
+        },
+
+        aggiornaTimerLocale() {
+            if (!this.partitaSelezionata) return;
+            const p = this.partite.find(x => x.id === this.partitaSelezionata);
+            if (!p || !p.timerAttivo) return;
+            const elapsed         = Math.floor((Date.now() - p.timerTimestamp) / 1000);
+            const secondiCorretti = p.timerSecondi + elapsed;
+            const durataBase      = p.timerTempo >= 3 ? DURATA_TEMPO_EXTRA : DURATA_TEMPO_STD;
+            const recupero        = p.timerTempo === 1 ? p.recupero1Tempo : p.recupero2Tempo;
+            const tempoTotale     = durataBase + (recupero * 60);
+            const rimasti         = tempoTotale - secondiCorretti;
+
+            if (rimasti <= 60 && rimasti > 59 && !this.avvisoMinutoSuonato) { this.avvisoMinutoSuonato = true; creaAvvisoMinuto(); }
+            if (rimasti > 0 && rimasti <= 15) creaBeep();
+            if (p.timerTempo === 1 && secondiCorretti >= tempoTotale && !this.fischioPrimoTempoSuonato) { this.fischioPrimoTempoSuonato = true; creaFischio(); }
+            if (p.timerTempo >= 2 && secondiCorretti >= tempoTotale && !this.fischioSecondoTempoSuonato) { this.fischioSecondoTempoSuonato = true; creaFischio(); }
+
+            this.aggiornaTimerDisplay(secondiCorretti, p.timerTempo);
+        },
+
+        aggiornaTimerDisplay(secondi, tempo) {
+            const timerEl = document.getElementById('timer-display');
+            if (timerEl) timerEl.textContent = this.formatoTempo(secondi);
+            const tempoEl = document.getElementById('tempo-display');
+            if (tempoEl) tempoEl.textContent =
+                tempo === 1 ? 'Tempo 1/2' : tempo === 2 ? 'Tempo 2/2' :
+                tempo === 3 ? '⚡ Silver Meta' : '🥇 Golden Meta';
+
+            const p = this.partite.find(x => x.id === this.partitaSelezionata);
+            if (!p) return;
+            const recupero   = tempo === 1 ? p.recupero1Tempo : p.recupero2Tempo;
+            const durataBase = tempo >= 3 ? DURATA_TEMPO_EXTRA : DURATA_TEMPO_STD;
+            const tempoTotale = durataBase + (recupero * 60);
+            const pct = Math.min((secondi / tempoTotale) * 100, 100);
+
+            const bar = document.getElementById('progress-bar');
+            if (bar) {
+                bar.style.width = `${pct}%`;
+                bar.className = `progress-bar h-full rounded-full ${pct > 90 ? 'bg-red-500' : pct > 75 ? 'bg-orange-500' : 'bg-cyan-500'}`;
+            }
+            const recEl = document.getElementById('recupero-display');
+            if (recEl) {
+                if (secondi > DURATA_TEMPO_STD) { recEl.textContent = `+${Math.floor((secondi - DURATA_TEMPO_STD) / 60) + 1}'`; recEl.classList.remove('hidden'); }
+                else recEl.classList.add('hidden');
+            }
+        },
+
+        formatoTempo(secondi) {
+            return `${String(Math.floor(secondi / 60)).padStart(2,'0')}:${String(secondi % 60).padStart(2,'0')}`;
+        },
+
+        /* ----------------------------------------------------------------
+           2F — CAMBIO TEMPO
+           ---------------------------------------------------------------- */
+
+        async passaAlSecondoTempoManuale(id) {
+            if (!confirm('⏭ Passare al 2° tempo?\n\nI vuoti individuali verranno azzerati e gli espulsi per vuoti rientreranno.\nI giocatori con cartellino giallo del 1° tempo potranno rientrare.')) return;
+            if (this.timerInterval) { clearInterval(this.timerInterval); this.timerInterval = null; }
+            this.avvisoMinutoSuonato = this.fischioPrimoTempoSuonato = this.fischioSecondoTempoSuonato = false;
+            const p = this.partite.find(x => x.id === id);
+            await this.aggiornaPartita(id, {
+                timerSecondi: 0, timerTempo: 2, timerAttivo: false, timerTimestamp: 0,
+                vuotiA: [], vuotiB: [], espulsiA: [], espulsiB: [],
+                cartelliniA: p.cartelliniA.filter(c => !(c.tipo === 'giallo' && c.tempo === 1)),
+                cartelliniB: p.cartelliniB.filter(c => !(c.tipo === 'giallo' && c.tempo === 1)),
+            });
+        },
+
+        async passaAllaSilverMeta(id) {
+            const p = this.partite.find(x => x.id === id);
+            if (!p || p.punteggioA !== p.punteggioB) { alert('⚠️ La Silver Meta si gioca solo in caso di parità!'); return; }
+            if (!confirm('⚡ SILVER META (5 min)\n\n✅ Rientrano: espulsi per vuoti, cartellini gialli\n❌ Rimangono fuori: cartellini rossi e neri\n✅ Vuoti individuali azzerati (limite: 2)')) return;
+            if (this.timerInterval) { clearInterval(this.timerInterval); this.timerInterval = null; }
+            this.avvisoMinutoSuonato = this.fischioPrimoTempoSuonato = this.fischioSecondoTempoSuonato = false;
+            await this.aggiornaPartita(id, {
+                timerSecondi: 0, timerTempo: 3, timerAttivo: false, timerTimestamp: 0,
+                vuotiA: [], vuotiB: [],
+                espulsiA: (p.cartelliniA||[]).filter(c=>c.tipo==='rosso'||c.tipo==='nero').map(c=>c.giocatore),
+                espulsiB: (p.cartelliniB||[]).filter(c=>c.tipo==='rosso'||c.tipo==='nero').map(c=>c.giocatore),
+                cartelliniA: (p.cartelliniA||[]).filter(c=>c.tipo!=='giallo'),
+                cartelliniB: (p.cartelliniB||[]).filter(c=>c.tipo!=='giallo'),
+            });
+        },
+
+        async passaAllaGoldenMeta(id) {
+            const p = this.partite.find(x => x.id === id);
+            if (!p || p.punteggioA !== p.punteggioB) { alert('⚠️ La Golden Meta si gioca solo in caso di parità!'); return; }
+            if (!confirm('🥇 GOLDEN META (5 min)\n\n❌ Espulsi nella Silver Meta rimangono fuori\n✅ Vuoti individuali mantenuti dalla Silver Meta (limite: 2)')) return;
+            if (this.timerInterval) { clearInterval(this.timerInterval); this.timerInterval = null; }
+            this.avvisoMinutoSuonato = this.fischioPrimoTempoSuonato = this.fischioSecondoTempoSuonato = false;
+            await this.aggiornaPartita(id, { timerSecondi: 0, timerTempo: 4, timerAttivo: false, timerTimestamp: 0 });
+        },
+
+        /* ----------------------------------------------------------------
+           2G — EVENTI DI GIOCO
+           ---------------------------------------------------------------- */
+
+        /** Crea un oggetto evento con giocatore, minuto corrente e tempo */
+        _creaEvento(giocatore, p) {
+            const elapsed  = p.timerAttivo ? Math.floor((Date.now() - p.timerTimestamp) / 1000) : 0;
+            const secondi  = p.timerSecondi + elapsed;
+            const minuto   = this.formatoTempo(secondi);
+            return { giocatore, minuto, tempo: p.timerTempo };
+        },
+
+        /** Estrae il nome giocatore da un evento (stringa o oggetto) */
+        _nomeGiocatore(ev) { return typeof ev === 'string' ? ev : (ev?.giocatore ?? ''); },
+
+        aggiungiElemento(id, squadra, tipo) {
+            const p      = this.partite.find(x => x.id === id);
+            const inputId = `${tipo === 'scalpo' ? 'scalpo' : tipo}-${squadra}-${id}`;
+            const input  = document.getElementById(inputId);
+            const val    = input.tagName === 'SELECT' ? input.value : input.value.trim();
+            if (!val) return;
+
+            const key = tipo === 'gol' ? `gol${squadra}` : tipo === 'scalpo' ? `scalpi${squadra}` : null;
+            if (!key) return;
+
+            const evento  = this._creaEvento(val, p);
+            const nuovi   = [...p[key], evento];
+            const updates = { [key]: nuovi };
+            if (tipo === 'gol') updates[`punteggio${squadra}`] = nuovi.length;
+
+            const idx = this.partite.findIndex(x => x.id === id);
+            if (idx !== -1) this.partite[idx] = { ...p, ...updates };
+            this.salvaPartitaAsync(id, updates);
+            input.value = '';
+            this.render();
+        },
+
+        rimuoviElemento(id, squadra, tipo, index) {
+            const p   = this.partite.find(x => x.id === id);
+            const key = tipo === 'gol' ? `gol${squadra}` : tipo === 'scalpo' ? `scalpi${squadra}` : tipo === 'vuoto' ? `vuoti${squadra}` : null;
+            if (!key) return;
+            const nuovi   = [...p[key]]; nuovi.splice(index, 1);
+            const updates = { [key]: nuovi };
+            if (tipo === 'gol')   updates[`punteggio${squadra}`]  = nuovi.length;
+            if (tipo === 'vuoto') updates[`vuotiSquadra${squadra}`] = Math.max(0, p[`vuotiSquadra${squadra}`] - 1);
+            const idx = this.partite.findIndex(x => x.id === id);
+            if (idx !== -1) this.partite[idx] = { ...p, ...updates };
+            this.salvaPartitaAsync(id, updates);
+            this.render();
+        },
+
+        aggiungiVuotoBtn(id, squadra) {
+            const input = document.getElementById(`vuoto-${squadra}-${id}`);
+            const val   = input.tagName === 'SELECT' ? input.value : input.value.trim();
+            if (!val) return;
+            const p = this.partite.find(x => x.id === id);
+            if (p[`espulsi${squadra}`].includes(val)) { alert('🟥 Giocatore già espulso!'); return; }
+            this.aggiungiVuoto(id, squadra, val);
+            input.value = '';
+        },
+
+        async aggiungiVuoto(id, squadra, giocatore) {
+            const p       = this.partite.find(x => x.id === id);
+            const evento  = this._creaEvento(giocatore, p);
+            const vuoti   = [...p[`vuoti${squadra}`], evento];
+            const conteggio = vuoti.filter(v => this._nomeGiocatore(v) === giocatore).length;
+            const nuoviVuotiSquadra = p[`vuotiSquadra${squadra}`] + 1;
+
+            let updates = { [`vuoti${squadra}`]: vuoti, [`vuotiSquadra${squadra}`]: nuoviVuotiSquadra };
+
+            const limite = p.timerTempo >= 3 ? LIMITE_VUOTI_EXTRA : LIMITE_VUOTI_STD;
+            if (conteggio >= limite) {
+                updates[`espulsi${squadra}`] = [...p[`espulsi${squadra}`], giocatore];
+                alert(`🟥 ESPULSIONE!\n${giocatore} ha ${limite} vuoti ed è stato espulso.`);
+            }
+
+            let messaggioFallo = '';
+            if (nuoviVuotiSquadra === SOGLIA_FALLO_VUOTI ||
+               (nuoviVuotiSquadra > SOGLIA_FALLO_VUOTI && (nuoviVuotiSquadra - SOGLIA_FALLO_VUOTI) % 3 === 0)) {
+                const nuoviFalli = p[`falliDifesa${squadra}`] + 1;
+updates[`falliDifesaTot${squadra}`] = (p[`falliDifesaTot${squadra}`] || 0) + 1;   // NUOVA
+                if (nuoviFalli === FALLI_PER_META) {
+                    const opp = squadra === 'A' ? 'B' : 'A';
+                    const metaEv = { giocatore: 'META (3° Fallo difesa)', minuto: this.formatoTempo(p.timerSecondi + (p.timerAttivo ? Math.floor((Date.now()-p.timerTimestamp)/1000) : 0)), tempo: p.timerTempo };
+                   
+                    const golOpposti = [...p[`gol${opp}`], metaEv];
+                    updates[`falliDifesa${squadra}`] = 0;
+                    updates[`gol${opp}`]   = golOpposti;
+                    updates[`punteggio${opp}`] = golOpposti.length;
+                    messaggioFallo = `\n\n⚠️ ${nuoviVuotiSquadra}° VUOTO DI SQUADRA!\n3° FALLO DI DIFESA!\nMETA assegnata a ${p[`squadra${opp}`]}`;
+                } else {
+                    updates[`falliDifesa${squadra}`] = nuoviFalli;
+                    messaggioFallo = `\n\n⚠️ ${nuoviVuotiSquadra}° VUOTO DI SQUADRA!\nFallo di difesa assegnato (${nuoviFalli}/3).`;
+                }
+            }
+
+            const idx = this.partite.findIndex(x => x.id === id);
+            if (idx !== -1) this.partite[idx] = { ...p, ...updates };
+            await this.salvaPartitaAsync(id, updates);
+            if (messaggioFallo) alert(messaggioFallo);
+            this.render();
+        },
+
+        azzeraVuoti(id, squadra) {
+            const p = this.partite.find(x => x.id === id);
+            if (!confirm(`⚠️ Azzerare SOLO i vuoti individuali?\n• Vuoti individuali: AZZERATI\n• Vuoti di squadra: RIMANGONO (${p[`vuotiSquadra${squadra}`]})\n• Espulsi per vuoti: RIENTRANO`)) return;
+            const updates = { [`vuoti${squadra}`]: [], [`espulsi${squadra}`]: [] };
+            const idx = this.partite.findIndex(x => x.id === id);
+            if (idx !== -1) this.partite[idx] = { ...p, ...updates };
+            this.salvaPartitaAsync(id, updates);
+            this.render();
+        },
+
+        rientraEspulso(id, squadra, giocatore) {
+            if (!confirm(`Far rientrare ${giocatore}?`)) return;
+            const p      = this.partite.find(x => x.id === id);
+            const espulsi = p[`espulsi${squadra}`].filter(e => e !== giocatore);
+            const updates = { [`espulsi${squadra}`]: espulsi };
+            const idx = this.partite.findIndex(x => x.id === id);
+            if (idx !== -1) this.partite[idx] = { ...p, ...updates };
+            this.salvaPartitaAsync(id, updates);
+            this.render();
+        },
+
+         async aggiungiFalloDifesa(id, squadra) {
+            const p = this.partite.find(x => x.id === id);
+            if (!p) return;
+            const opp        = squadra === 'A' ? 'B' : 'A';
+            const nuoviFalli = p[`falliDifesa${squadra}`] + 1;
+            const nuovoTot   = (p[`falliDifesaTot${squadra}`] || 0) + 1;
+            if (nuoviFalli === FALLI_PER_META) {
+                const metaEv = { giocatore: 'META (3° Fallo difesa)', minuto: this.formatoTempo(p.timerSecondi + (p.timerAttivo ? Math.floor((Date.now()-p.timerTimestamp)/1000) : 0)), tempo: p.timerTempo };
+                const golOpposti = [...p[`gol${opp}`], metaEv];
+                await this.aggiornaPartita(id, {
+                    [`falliDifesa${squadra}`]: 0,
+                    [`falliDifesaTot${squadra}`]: nuovoTot,
+                    [`gol${opp}`]: golOpposti,
+                    [`punteggio${opp}`]: golOpposti.length
+                });
+                alert(`⚠️ 3° FALLO DI DIFESA!\nMETA assegnata a ${p[`squadra${opp}`]}`);
+            } else {
+                await this.aggiornaPartita(id, { [`falliDifesa${squadra}`]: nuoviFalli, [`falliDifesaTot${squadra}`]: nuovoTot });
+                alert(`✓ Fallo di difesa registrato (${nuoviFalli}/3)`);
+            }
+        },   
+        
+        async aggiungiCartellino(id, squadra, giocatore, tipo) {
+            const p = this.partite.find(x => x.id === id);
+            if (!p) return;
+            const evento = { giocatore, tipo, tempo: p.timerTempo, minuto: this.formatoTempo(p.timerSecondi + (p.timerAttivo ? Math.floor((Date.now()-p.timerTimestamp)/1000) : 0)) };
+            const nuoviCartellini = [...p[`cartellini${squadra}`], evento];
+            const updates = { [`cartellini${squadra}`]: nuoviCartellini };
+
+            if (tipo === 'nero') {
+                try {
+                    await supabase.from('squalifiche').insert([{ nome_giocatore: giocatore, nome_squadra: p[`squadra${squadra}`], partita_id: id }]);
+                    await this.caricaSqualifiche();
+                } catch (e) { console.error('Errore registrazione squalifica:', e); }
+                alert(`⬛ SQUALIFICA!\n${giocatore} è squalificato per tutto il torneo.`);
+            } else if (tipo === 'rosso') {
+                alert(`🟥 CARTELLINO ROSSO!\n${giocatore} è escluso per tutta la partita.`);
+            } else {
+                alert(`🟨 CARTELLINO GIALLO!\n${giocatore} è escluso per questo tempo.`);
+            }
+
+            const idx = this.partite.findIndex(x => x.id === id);
+            if (idx !== -1) this.partite[idx] = { ...p, ...updates };
+            await this.salvaPartitaAsync(id, updates);
+            this.render();
+        },
+
+        async rimuoviCartellino(id, squadra, index) {
+            const p = this.partite.find(x => x.id === id);
+            if (!p) return;
+            const nuoviCartellini = [...p[`cartellini${squadra}`]]; nuoviCartellini.splice(index, 1);
+            const updates = { [`cartellini${squadra}`]: nuoviCartellini };
+            const idx = this.partite.findIndex(x => x.id === id);
+            if (idx !== -1) this.partite[idx] = { ...p, ...updates };
+            await this.salvaPartitaAsync(id, updates);
+            this.render();
+        },
+
+        /* ----------------------------------------------------------------
+           2H — SQUALIFICHE
+           ---------------------------------------------------------------- */
+
+        async caricaSqualifiche() {
+            try {
+                const { data, error } = await supabase.from('squalifiche').select('nome_giocatore, nome_squadra');
+                if (error) throw error;
+                this.squalifiche = data || [];
+            } catch (e) { console.error('Errore caricamento squalifiche:', e); this.squalifiche = []; }
+        },
+
+        _statoGiocatore(gNome, squadra, nome, p) {
+            if (this.squalifiche.some(s => s.nome_giocatore === gNome && s.nome_squadra === nome))
+                return { disabilitato: true, motivo: '⬛ SQUAL' };
+            if (p[`cartellini${squadra}`].some(c => c.giocatore === gNome && c.tipo === 'rosso'))
+                return { disabilitato: true, motivo: '🟥 ESP' };
+            if (p[`cartellini${squadra}`].some(c => c.giocatore === gNome && c.tipo === 'giallo' && c.tempo === p.timerTempo))
+                return { disabilitato: true, motivo: '🟨 ESP' };
+            if (p[`espulsi${squadra}`].includes(gNome))
+                return { disabilitato: true, motivo: '[ESP]' };
+            return { disabilitato: false, motivo: '' };
+        },
+
+        /* ----------------------------------------------------------------
+           2I — FINALIZZAZIONE
+           ---------------------------------------------------------------- */
+
+        async confermaSalvaPartita(id) {
+            const p    = this.partite.find(x => x.id === id);
+            const mvpA = document.getElementById('mvp-select-a').value;
+            const mvpB = document.getElementById('mvp-select-b').value;
+
+            if (p.timerTempo === 1 && (p.timerAttivo || p.timerSecondi > 0)) {
+                alert('⚠️ Il 2° tempo non è ancora iniziato.\n\nPassa al 2° tempo prima di finalizzare la partita.'); return;
+            }
+            if ([2,3,4].includes(p.timerTempo) && p.timerAttivo) {
+                const nomeT = p.timerTempo === 2 ? '2° tempo' : p.timerTempo === 3 ? 'Silver Meta' : 'Golden Meta';
+                if (!confirm(`⚠️ La ${nomeT} è ancora in corso!\n\nVuoi finalizzare comunque?`)) return;
+            }
+            if (p.timerTempo === 2 && p.punteggioA === p.punteggioB) {
+                if (!confirm('⚠️ La partita è in parità!\n\nVuoi finalizzare senza Silver Meta?')) return;
+            }
+            if (!mvpA || !mvpB) {
+                const mancanti = [...(!mvpA ? [p.squadraA] : []), ...(!mvpB ? [p.squadraB] : [])];
+                if (!confirm(`⚠️ MVP non selezionati per:\n${mancanti.join('\n')}\n\nVuoi finalizzare comunque?`)) return;
+            }
+
+            const scoreA = p.golA.length, scoreB = p.golB.length;
+            let puntiA = 0, puntiB = 0;
+            if (scoreA > scoreB) puntiA = 3; else if (scoreB > scoreA) puntiB = 3; else { puntiA = 1; puntiB = 1; }
+
+            await this.fermaTimer(id);
+            await this.rilasciaControlloPartita(id);
+            await this.aggiornaPartita(id, { punteggioA: scoreA, punteggioB: scoreB, puntiA, puntiB, mvpA, mvpB, completata: true });
+            this.partitaSelezionata = null;
+        },
+
+        /* ----------------------------------------------------------------
+           2J — CLASSIFICHE E STATISTICHE
+           ---------------------------------------------------------------- */
+
+        calcolaClassifica() {
+            const cls = {};
+            this.partite.filter(p => p.completata).forEach(p => {
+                [[p.squadraA, p.puntiA, p.punteggioA, p.punteggioB],
+                 [p.squadraB, p.puntiB, p.punteggioB, p.punteggioA]].forEach(([sq, pt, gf, gs]) => {
+                    if (!cls[sq]) cls[sq] = { nome: sq, punti: 0, giocate: 0, vinte: 0, pareggiate: 0, perse: 0, gf: 0, gs: 0 };
+                    cls[sq].punti += pt; cls[sq].giocate++; cls[sq].gf += gf; cls[sq].gs += gs;
+                    if (gf > gs) cls[sq].vinte++; else if (gf === gs) cls[sq].pareggiate++; else cls[sq].perse++;
+                });
+            });
+            return Object.values(cls).sort((a, b) => {
+                if (b.punti !== a.punti) return b.punti - a.punti;
+                const da = a.gf - a.gs, db = b.gf - b.gs;
+                return db !== da ? db - da : b.gf - a.gf;
+            });
+        },
+
+calcolaStatistiche() {
+    const m = {}, s = {}, mvps = {};
+    const vuotiSq = {}, falliSq = {}, partiteSq = {};
+
+    this.partite.forEach(p => {
+        ['A','B'].forEach(sq => {
+            const nome = p[`squadra${sq}`];
+
+            // Statistiche giocatori (invariate)
+            p[`gol${sq}`].forEach(ev => {
+                const g = this._nomeGiocatore(ev);
+                if (!g.includes('META') && !g.includes("META'")) { const k = `${g}||${nome}`; m[k] = (m[k]||0)+1; }
+            });
+            p[`scalpi${sq}`].forEach(ev => { const g = this._nomeGiocatore(ev); const k = `${g}||${nome}`; s[k] = (s[k]||0)+1; });
+            if (p[`mvp${sq}`]) { const k = `${p[`mvp${sq}`]}||${nome}`; mvps[k] = (mvps[k]||0)+1; }
+
+            // Statistiche di squadra (solo partite completate)
+            if (p.completata) {
+                partiteSq[nome] = (partiteSq[nome]||0) + 1;
+                vuotiSq[nome]   = (vuotiSq[nome]||0)   + (p[`vuotiSquadra${sq}`]   || 0);
+                falliSq[nome]   = (falliSq[nome]||0)   + (p[`falliDifesaTot${sq}`] || 0);
+            }
+        });
+    });
+
+    const parse = (obj, campo) => Object.entries(obj).map(([k, n]) => { const [nome, sq] = k.split('||'); return { nome, squadra: sq, [campo]: n }; }).sort((a,b) => b[campo]-a[campo]);
+
+    const perSquadra = (obj) => Object.entries(obj)
+        .filter(([, n]) => n > 0)
+        .map(([nome, n]) => ({ nome, valore: n, partite: partiteSq[nome] || 0 }))
+        .sort((a,b) => b.valore - a.valore || a.partite - b.partite);
+
+    return {
+        marcatori:     parse(m,'gol'),
+        scalpatori:    parse(s,'scalpi'),
+        mvps:          parse(mvps,'volte'),
+        vuotiSquadre:  perSquadra(vuotiSq),
+        falliSquadre:  perSquadra(falliSq),
+    };
+},
+
+        /* ----------------------------------------------------------------
+           2K — ADMIN: GESTIONE ARBITRI
+           ---------------------------------------------------------------- */
+
+        async adminAggiungiArbitro(email, nome, ruolo) {
+            try {
+                const { error } = await supabase.from('arbitri').insert([{ email, nome, ruolo, attivo: true }]);
+                if (error) throw error;
+                this.arbitriLista = await this.caricaArbitri();
+                alert(`✓ Arbitro ${email} aggiunto!`);
+                this.render();
+            } catch (e) { alert('Errore: ' + e.message); }
+        },
+
+        async adminToggleArbitro(email, attivoCorrente) {
+            try {
+                const { error } = await supabase.from('arbitri').update({ attivo: !attivoCorrente }).eq('email', email);
+                if (error) throw error;
+                this.arbitriLista = await this.caricaArbitri();
+                this.render();
+            } catch (e) { alert('Errore: ' + e.message); }
+        },
+
+        async adminCambiaRuolo(email, ruoloCorrente) {
+            const nuovoRuolo = ruoloCorrente === 'organizzatore' ? 'arbitro' : 'organizzatore';
+            if (!confirm(`Cambiare il ruolo di ${email} in "${nuovoRuolo}"?`)) return;
+            try {
+                const { error } = await supabase.from('arbitri').update({ ruolo: nuovoRuolo }).eq('email', email);
+                if (error) throw error;
+                this.arbitriLista = await this.caricaArbitri();
+                this.render();
+            } catch (e) { alert('Errore: ' + e.message); }
+        },
+
+      /* ----------------------------------------------------------------
+           2L — PDF REFERTO DETTAGLIATO
+           ---------------------------------------------------------------- */
+
+
+async generaPDF(id, soloBlob = false) {
+
+    const p = this.partite.find(x => x.id === id);
+
+    if (!p) return;
+
+    const { jsPDF } = window.jspdf;
+
+    const doc = new jsPDF();
+
+
+
+    // ── Helper: aggiunge pagina se necessario e restituisce la y corrente ──
+
+    const check = (y, spazio = 10) => {
+
+        if (y + spazio > 270) {
+
+            doc.addPage();
+
+            doc.setFontSize(8); doc.setTextColor(150,150,150);
+
+            doc.text(`${p.squadraA} vs ${p.squadraB} - continua`, 105, 10, { align: 'center' });
+
+            doc.setTextColor(0,0,0);
+
+            return 20;
+
+        }
+
+        return y;
+
+    };
+
+
+
+    // ── Helper: riga di testo con y automatica ──
+
+    const riga = (testo, x, y, opzioni = {}) => {
+
+        doc.text(testo, x, y, opzioni);
+
+        return y + (opzioni.interlinea || 7);
+
+    };
+
+
+
+    let y = 15;
+
+
+
+    // ── 1. TITOLO ──
+
+    doc.setFontSize(18); doc.setTextColor(14,116,144);
+
+    y = riga('24OdG - REFERTO PARTITA', 105, y, { align: 'center' });
+
+    y += 3;
+
+
+
+    // ── 2. INFO PARTITA ──
+
+    doc.setFontSize(10); doc.setTextColor(80,80,80);
+
+    y = riga(`Campo: ${p.campo}  •  Orario: ${p.orario}  •  Data: ${new Date().toLocaleDateString('it-IT')}`, 20, y);
+
+    if (p.arbitroAssegnato) y = riga(`Arbitro: ${p.arbitroAssegnato}`, 20, y);
+
+    if (p.timerTempo >= 3) {
+
+        doc.setTextColor(180,130,0);
+
+        y = riga(`Supplementari: ${p.timerTempo === 3 ? 'Silver Meta' : 'Golden Meta'}`, 20, y);
+
+        doc.setTextColor(80,80,80);
+
+    }
+
+ 
+
+    y += 2;
+
+
+
+    // ── 3. LINEA ──
+
+    doc.setDrawColor(14,116,144); doc.line(20, y, 190, y); y += 8;
+
+
+
+    // ── 4. LOGHI + NOMI SQUADRE + RISULTATO ──
+
+    const yBloccoRisultato = y;
+
+
+
+    // Loghi (caricati in parallelo)
+
+    const caricaLogo = async (nome, x, yPos) => {
+
+        try {
+
+            const url  = this.logoSquadra(nome);
+
+            const resp = await fetch(url);
+
+            if (!resp.ok) return;
+
+            const blob   = await resp.blob();
+
+            const reader = new FileReader();
+
+            await new Promise(res => { reader.onload = res; reader.readAsDataURL(blob); });
+
+            doc.addImage(reader.result, 'PNG', x, yPos, 14, 14);
+
+        } catch(e) { /* logo non disponibile */ }
+
+    };
+
+    await Promise.all([
+
+        caricaLogo(p.squadraA, 20, yBloccoRisultato),
+
+        caricaLogo(p.squadraB, 176, yBloccoRisultato),
+
+    ]);
+
+
+
+    // Nomi squadre
+
+    doc.setFontSize(13); doc.setTextColor(14,116,144);
+
+    doc.text(p.squadraA, 36, yBloccoRisultato + 9);
+
+    doc.text(p.squadraB, 174, yBloccoRisultato + 9, { align: 'right' });
+
+
+
+    // Risultato al centro
+
+    doc.setFontSize(24); doc.setTextColor(180,130,0);
+
+    doc.text(`${p.punteggioA}  -  ${p.punteggioB}`, 105, yBloccoRisultato + 9, { align: 'center' });
+
+
+
+    y = yBloccoRisultato + 18;
+
+    y += 2;
+
+doc.setFontSize(11);
+doc.setFont(undefined, 'bold');
+doc.setTextColor(80, 80, 80);
+
+const yVuoti = y;
+riga(`Vuoti sq.: ${p.vuotiSquadraA}   Falli difesa: ${p.falliDifesaTotA}`, 20, yVuoti);
+y = riga(`Vuoti sq.: ${p.vuotiSquadraB}   Falli difesa: ${p.falliDifesaTotB}`, 110, yVuoti);
+y += 4;
+
+
+    // ── 5. LINEA ──
+
+    doc.setDrawColor(14,116,144); doc.line(20, y, 190, y); y += 8;
+
+
+
+    // ── 6. CONTENUTO SQUADRE (colonne dinamiche) ──
+
+    // Raccoglie tutti gli eventi di una squadra in righe testo
+
+    const righeSquadra = (gol, scalpi, vuoti, cartellini, mvp) => {
+
+        const blocchi = [];
+
+
+
+        const golReali = gol.filter(ev => !this._nomeGiocatore(ev).includes('META'));
+
+        const mete     = gol.filter(ev =>  this._nomeGiocatore(ev).includes('META'));
+
+
+
+        const formatta = ev => {
+
+            const g   = this._nomeGiocatore(ev);
+
+            const min = (typeof ev === 'object' && ev.minuto) ? ` [${ev.minuto} T${ev.tempo}]` : '';
+
+            return g + min;
+
+        };
+
+
+
+        if (golReali.length)    blocchi.push({ titolo: `Gol (${golReali.length})`,       righe: golReali.map(formatta) });
+
+        if (mete.length)        blocchi.push({ titolo: `Mete (${mete.length})`,           righe: mete.map(formatta) });
+
+        if (scalpi.length)      blocchi.push({ titolo: `Scalpi (${scalpi.length})`,       righe: scalpi.map(formatta) });
+
+        if (vuoti.length)       blocchi.push({ titolo: `Vuoti (${vuoti.length})`,         righe: vuoti.map(formatta) });
+
+        if (cartellini.length)  blocchi.push({ titolo: `Cartellini (${cartellini.length})`, righe: cartellini.map(c => {
+
+            const s = c.tipo==='giallo'?'[G]':c.tipo==='rosso'?'[R]':'[N]';
+
+            const min = c.minuto ? ` [${c.minuto} T${c.tempo}]` : '';
+
+            return `${s} ${c.giocatore}${min}`;
+
+        })});
+
+        if (mvp) blocchi.push({ titolo: `MVP`, righe: [mvp], mvp: true });
+
+
+
+        return blocchi;
+
+    };
+
+
+
+    const blocchiA = righeSquadra(p.golA, p.scalpiA, p.vuotiA, p.cartelliniA, p.mvpA);
+
+    const blocchiB = righeSquadra(p.golB, p.scalpiB, p.vuotiB, p.cartelliniB, p.mvpB);
+
+    const maxBlocchi = Math.max(blocchiA.length, blocchiB.length);
+
+
+
+    // Stampa i blocchi affiancati, blocco per blocco, riga per riga
+
+    // Così se un blocco è più lungo dell'altro, la y avanza insieme
+
+    for (let b = 0; b < maxBlocchi; b++) {
+
+        const bA = blocchiA[b];
+
+        const bB = blocchiB[b];
+
+        const maxRighe = Math.max(bA ? bA.righe.length + 1 : 0, bB ? bB.righe.length + 1 : 0);
+
+
+
+        y = check(y, maxRighe * 6 + 4);
+
+
+
+        // Titolo blocco
+
+        doc.setFontSize(9);
+
+        if (bA) {
+
+            doc.setFont(undefined, 'bold');
+
+            doc.setTextColor(bA.mvp ? 100 : 0, bA.mvp ? 50 : 0, bA.mvp ? 180 : 0);
+
+            doc.text(bA.titolo, 20, y);
+
+        }
+
+        if (bB) {
+
+            doc.setFont(undefined, 'bold');
+
+            doc.setTextColor(bB.mvp ? 100 : 0, bB.mvp ? 50 : 0, bB.mvp ? 180 : 0);
+
+            doc.text(bB.titolo, 110, y);
+
+        }
+
+        doc.setFont(undefined, 'normal'); doc.setTextColor(0,0,0);
+
+        y += 6;
+
+
+
+        // Righe del blocco
+
+        const maxR = Math.max(bA ? bA.righe.length : 0, bB ? bB.righe.length : 0);
+
+        for (let r = 0; r < maxR; r++) {
+
+            y = check(y, 6);
+
+            doc.setFontSize(8.5);
+
+            if (bA && bA.righe[r]) doc.text(`  ${bA.righe[r]}`, 20, y);
+
+            if (bB && bB.righe[r]) doc.text(`  ${bB.righe[r]}`, 110, y);
+
+            y += 5.5;
+
+        }
+
+        y += 3; // spazio tra blocchi
+
+    }
+
+
+
+    // ── 7. FOOTER su tutte le pagine ──
+
+    const tot = doc.internal.getNumberOfPages();
+
+    for (let i = 1; i <= tot; i++) {
+
+        doc.setPage(i);
+
+        doc.setFontSize(8); doc.setTextColor(150,150,150);
+
+        doc.line(20, 280, 190, 280);
+
+        doc.text(`Generato da 24OdG ® - All Rights Reserved | Pagina ${i} di ${tot}`, 105, 286, { align: 'center' });
+
+    }
+
+
+
+    if (soloBlob) return doc.output('blob');
+
+    doc.save(`referto_${p.squadraA}_vs_${p.squadraB}_${new Date().toLocaleDateString('it-IT')}.pdf`);
+
+}, 
+          
+          /* ----------------------------------------------------------------
+           2M — TELEGRAM
+           ---------------------------------------------------------------- */
+
+async inviaRefertoTelegram(id) {
+    const p = this.partite.find(x => x.id === id);
+    if (!p) return;
+
+    try {
+        alert('⏳ Generazione referto in corso...');
+
+        const pdfBlob  = await this.generaPDF(id, true);
+        const nomeFile = `referto_${p.squadraA}_vs_${p.squadraB}.pdf`;
+
+        const formData = new FormData();
+        formData.append('document', pdfBlob, nomeFile);
+        formData.append('caption',
+            `📋 ${p.squadraA} ${p.punteggioA} - ${p.punteggioB} ${p.squadraB}\n` +
+            `🏟 Campo ${p.campo} • ${p.orario}\n` +
+            `📅 ${new Date().toLocaleDateString('it-IT')}`
+        );
+
+        const { data: risultato, error } = await supabase.functions.invoke('invia-telegram', { body: formData });
+        if (error) {
+            let dettaglio = error.message;
+            try { const j = await error.context.json(); dettaglio = j.description || JSON.stringify(j); } catch (_) {}
+            throw new Error(dettaglio);
+        }
+
+        if (risultato.ok) alert('✅ Referto inviato su Telegram!');
+        else alert('❌ Errore Telegram: ' + risultato.description);
+    } catch (e) {
+        console.error('Errore invio Telegram:', e);
+        alert('❌ Errore durante l\'invio del referto: ' + e.message);
+    }
+},          
+        // =========================================================
+        // La PARTE 3 viene incollata qui sotto
+        // =========================================================
+
+          // =============================================================
+        // PARTE 3 — RENDER (INTERFACCE UTENTE)
+        // =============================================================
+
+        /* ----------------------------------------------------------------
+           3A — ROUTER
+           ---------------------------------------------------------------- */
+
+        render() {
+            if (this.partitaSelezionata) this.renderFormPartita();
+            else this.renderMain();
+        },
+
+        /* ----------------------------------------------------------------
+           3B — LOGIN
+           ---------------------------------------------------------------- */
+
+        renderLogin() {
+            document.getElementById('app').innerHTML = `
+                <div class="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 flex items-center justify-center p-4">
+                    <div class="bg-gray-800 rounded-lg shadow-2xl border border-gray-700 p-8 max-w-md w-full">
+                        <div class="text-center mb-8">
+                            <h1 class="text-4xl font-bold text-cyan-400 mb-2">24OdG</h1>
+                            <p class="text-gray-400">Gestionale Arbitri</p>
+                        </div>
+                        <form onsubmit="app.effettuaLogin(event)" class="space-y-4">
+                            <div>
+                                <label class="block text-sm mb-2 text-gray-300">Email</label>
+                                <input type="email" id="email-input" placeholder="arbitro@24odg.it"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-3 text-white focus:border-cyan-500 focus:outline-none" required>
+                            </div>
+                            <button type="submit" class="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-3 px-4 rounded mt-6">
+                                🔒 Accedi
+                            </button>
+                        </form>
+                        <div class="mt-6 p-4 bg-blue-900 bg-opacity-30 border border-blue-700 rounded-lg">
+                            <p class="text-xs text-blue-300"><span class="font-bold">ℹ️ Nota:</span> Solo arbitri autorizzati possono accedere.</p>
+                        </div>
+                    </div>
+                </div>`;
+        },
+
+        /* ----------------------------------------------------------------
+           3C — SHELL PRINCIPALE
+           ---------------------------------------------------------------- */
+
+        renderMain() {
+            const completate = this.partite.filter(p => p.completata).length;
+            const voci = [
+                { id: 'partite',     label: '⚽ Partite' },
+                { id: 'squadre',     label: '👥 Squadre' },
+                { id: 'classifica',  label: '📊 Classifica' },
+                { id: 'statistiche', label: '📈 Statistiche' },
+                ...(this.isOrganizzatore() ? [{ id: 'admin', label: '⚙️ Admin' }] : []),
+            ];
+
+            document.getElementById('app').innerHTML = `
+                <div class="max-w-6xl mx-auto p-4">
+                    <header class="mb-8">
+                        <div class="flex items-center justify-center gap-3 mb-2">
+                            <h1 class="text-4xl font-bold font-serif">
+  <span class="text-[#1545cd]">2</span><span class="text-[#e51717]">4</span><span class="text-[#fbc205]">o</span><span class="text-[#1545cd]">r</span><span class="text-[#12b226]">e</span><span class="text-[#e51717]">d</span><span class="text-[#1545cd]">e</span><span class="text-[#fbc205]">l</span><span class="text-[#1545cd]">l</span><span class="text-[#12b226]">e</span><span class="text-[#12b226]">G</span><span class="text-[#1545cd]">r</span><span class="text-[#fbc205]">a</span><span class="text-[#1545cd]">z</span><span class="text-[#e51717]">i</span><span class="text-[#12b226]">e</span>
+</h1>
+</div>
+<div class="flex items-center justify-center gap-3 mb-2">                           
+<div class="px-3 py-1 rounded-full text-sm ${this.connesso ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}">
+                                ${this.connesso ? '🟢 Online' : '🔴 Offline'}
+                            </div>
+                        </div>
+                        <p class="text-center text-gray-400">Partite: ${this.partite.length} | Completate: ${completate} | Squadre: ${Object.keys(this.squadre).length}</p>
+                        <p class="text-center text-sm mt-2">
+                            <span class="text-cyan-400">👤 ${this.emailUtente}</span>
+                            ${this.isOrganizzatore() ? '<span class="ml-2 text-xs bg-purple-700 text-purple-200 px-2 py-0.5 rounded-full">Organizzatore</span>' : ''}
+                            <button onclick="app.logout()" class="ml-3 text-xs bg-red-600 hover:bg-red-700 px-2 py-1 rounded">Logout</button>
+                        </p>
+                    </header>
+
+                    <nav class="flex gap-2 mb-6 overflow-x-auto pb-2">
+                        ${voci.map(v => `
+                            <button onclick="app.vista='${v.id}';app.render()"
+                                class="px-4 py-2 rounded font-semibold whitespace-nowrap ${this.vista === v.id ? 'bg-cyan-600 text-white' : 'bg-gray-700 text-gray-300'}">
+                                ${v.label}
+                            </button>`).join('')}
+                    </nav>
+
+                    <main id="contenuto"></main>
+                </div>`;
+
+            if      (this.vista === 'partite')     this.renderPartite();
+            else if (this.vista === 'squadre')     this.renderSquadre();
+            else if (this.vista === 'classifica')  this.renderClassifica();
+            else if (this.vista === 'statistiche') this.renderStatistiche();
+            else if (this.vista === 'admin')       this.renderAdmin();
+        },
+
+        /* ----------------------------------------------------------------
+           3D — PARTITE
+           ---------------------------------------------------------------- */
+
+        renderPartite() {
+            const daGiocare          = this.partite.filter(p => !p.completata);
+            const completate         = this.partite.filter(p => p.completata);
+            const squadreDisponibili = Object.keys(this.squadre).sort();
+
+            const selectSq = (elId, label) => squadreDisponibili.length > 0
+                ? `<select id="${elId}" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white">
+                       <option value="">-- Seleziona --</option>
+                       ${squadreDisponibili.map(s => `<option value="${s}">${s}</option>`).join('')}
+                   </select>`
+                : `<input type="text" id="${elId}" placeholder="${label}" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white">`;
+
+            document.getElementById('contenuto').innerHTML = `
+                <div class="mb-6 flex gap-2 overflow-x-auto pb-2">
+                    ${[['tutte',`Tutte (${this.partite.length})`],['da_giocare',`Da Giocare (${daGiocare.length})`],['completate',`Completate (${completate.length})`]].map(([k,lbl]) => `
+                        <button onclick="app.sottovista='${k}';app.renderPartite()"
+                            class="px-4 py-2 rounded font-semibold whitespace-nowrap ${this.sottovista===k?'bg-cyan-600 text-white':'bg-gray-700 text-gray-300'}">${lbl}</button>`).join('')}
+                </div>
+
+                ${this.isOrganizzatore() ? `
+                <div class="bg-gray-800 rounded-lg p-6 mb-6 shadow-xl border border-gray-700">
+                    <div class="flex justify-between items-center mb-4 flex-wrap gap-2">
+                        <h2 class="text-xl font-semibold text-cyan-400">Nuova Partita</h2>
+                        <button onclick="app.importaPartite()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded font-semibold text-sm">🔥 Import Partite</button>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
+                        <div><label class="block text-sm mb-2 text-gray-300">Campo</label>
+                            <select id="campo" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white">
+                                ${[1,2,3,4,5,6,7,8].map(c=>`<option value="${c}">${c}</option>`).join('')}
+                            </select></div>
+                        <div><label class="block text-sm mb-2 text-gray-300">Orario</label>
+                            <input type="time" id="orario" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"></div>
+                        <div><label class="block text-sm mb-2 text-gray-300">Squadra A</label>${selectSq('squadraA','Nome squadra')}</div>
+                        <div><label class="block text-sm mb-2 text-gray-300">Squadra B</label>${selectSq('squadraB','Nome squadra')}</div>
+                        <div class="flex items-end">
+                            <button onclick="app.handleAggiungiPartita()" class="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-semibold py-2 px-4 rounded">➕ Aggiungi</button>
+                        </div>
+                    </div>
+                </div>` : ''}
+
+                <div id="filtriPartite"></div>
+                <div id="listaPartite"></div>`;
+
+            this.renderFiltriPartite();
+            this.renderListaPartite();
+        },
+
+        renderFiltriPartite() {
+            let filtrate = this.partite;
+            if (this.sottovista === 'da_giocare') filtrate = filtrate.filter(p => !p.completata);
+            else if (this.sottovista === 'completate') filtrate = filtrate.filter(p => p.completata);
+            const campi = [...new Set(filtrate.map(p => p.campo))].sort((a,b)=>a-b);
+            const orari = [...new Set(filtrate.map(p => p.orario).filter(o=>o))].sort();
+
+            document.getElementById('filtriPartite').innerHTML = `
+                <div class="bg-gray-800 rounded-lg p-4 mb-6 shadow-xl border border-gray-700">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div><label class="block text-sm mb-2 text-gray-300">Filtra per Campo</label>
+                            <select id="selectFiltroCampo" class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                <option value="tutti">Tutti i campi</option>
+                                ${campi.map(c=>`<option value="${c}">Campo ${c}</option>`).join('')}
+                            </select></div>
+                        <div><label class="block text-sm mb-2 text-gray-300">Filtra per Orario</label>
+                            <select id="selectFiltroOrario" class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                <option value="tutti">Tutti gli orari</option>
+                                ${orari.map(o=>`<option value="${o}">${o}</option>`).join('')}
+                            </select></div>
+                    </div>
+                </div>`;
+
+            const sc = document.getElementById('selectFiltroCampo');
+            const so = document.getElementById('selectFiltroOrario');
+            if (sc) { sc.value = this.filtroCampo;  sc.onchange = e => { this.filtroCampo  = e.target.value; this.renderListaPartite(); }; }
+            if (so) { so.value = this.filtroOrario; so.onchange = e => { this.filtroOrario = e.target.value; this.renderListaPartite(); }; }
+        },
+
+        handleAggiungiPartita() {
+            if (!this.isOrganizzatore()) return;
+            const campo    = parseInt(document.getElementById('campo').value);
+            const orario   = document.getElementById('orario').value;
+            const squadraA = document.getElementById('squadraA').value.trim();
+            const squadraB = document.getElementById('squadraB').value.trim();
+            if (!squadraA || !squadraB) { alert('❌ Seleziona entrambe le squadre!'); return; }
+            this.aggiungiPartita(campo, orario, squadraA, squadraB);
+            document.getElementById('squadraA').value = '';
+            document.getElementById('squadraB').value = '';
+            document.getElementById('orario').value   = '';
+        },
+
+        renderListaPartite() {
+            let partite = this.partite;
+            if (this.sottovista === 'da_giocare') partite = partite.filter(p => !p.completata);
+            else if (this.sottovista === 'completate') partite = partite.filter(p => p.completata);
+            if (this.filtroCampo  !== 'tutti') partite = partite.filter(p => p.campo   === parseInt(this.filtroCampo));
+            if (this.filtroOrario !== 'tutti') partite = partite.filter(p => p.orario  === this.filtroOrario);
+
+            // Per gli arbitri (non organizzatori) mostra solo le partite assegnate a loro o non assegnate
+            if (!this.isOrganizzatore()) {
+                partite = partite.filter(p => !p.arbitroAssegnato || p.arbitroAssegnato === this.emailUtente);
+            }
+
+            if (partite.length === 0) {
+                document.getElementById('listaPartite').innerHTML = '<div class="text-center text-gray-500 py-12">Nessuna partita trovata</div>';
+                return;
+            }
+
+            const gruppi = {};
+            partite.forEach(p => {
+                const key = `${p.orario || 'Senza orario'}_Campo ${p.campo}`;
+                if (!gruppi[key]) gruppi[key] = [];
+                gruppi[key].push(p);
+            });
+
+            document.getElementById('listaPartite').innerHTML = Object.keys(gruppi).sort().map(key => `
+                <div class="mb-6">
+                    <div class="bg-gray-700 px-4 py-2 rounded-t-lg font-semibold text-cyan-300">🕐 ${key}</div>
+                    <div class="space-y-3 mt-2">
+                        ${gruppi[key].map(p => {
+                            const arbitroAttivo = p.arbitroAttivo && (Date.now() - p.arbitroTimestamp) < TIMEOUT_ARBITRO;
+                            const accessibile   = this._puoAccedere(p);
+
+                            const badgeCls  = p.completata ? 'bg-green-900 text-green-300' : p.timerAttivo ? 'bg-red-900 text-red-300' : p.timerSecondi > 0 ? 'bg-yellow-900 text-yellow-300' : 'bg-gray-700 text-gray-300';
+                            const badgeTxt  = p.completata ? '✓ Completata' : p.timerAttivo ? '⏱️ Timer attivo' : p.timerSecondi > 0 ? '⏸ In pausa' : '📝 Da iniziare';
+
+                            // Punteggio in corso visibile direttamente in lista
+                            const punteggioInCorso = !p.completata && (p.golA.length > 0 || p.golB.length > 0)
+                                ? `<span class="text-yellow-400 font-bold ml-2">${p.golA.length} - ${p.golB.length}</span>` : '';
+
+                            return `
+                            <div class="bg-gray-800 rounded-lg p-4 shadow-lg border ${!accessibile ? 'border-gray-600 opacity-75' : 'border-gray-700'}">
+                                <div class="flex items-center justify-between mb-3">
+                                    <div class="flex-1">
+                                        <div class="text-lg font-bold">
+                                            <span class="flex items-center gap-1">
+    ${this.imgLogo(p.squadraA, 'w-5 h-5 object-contain')}
+    <span class="text-cyan-300">${p.squadraA}</span>
+</span>
+<span class="text-gray-500 mx-2">vs</span>
+<span class="flex items-center gap-1">
+    <span class="text-cyan-300">${p.squadraB}</span>
+    ${this.imgLogo(p.squadraB, 'w-5 h-5 object-contain')}
+</span>
+                                            ${punteggioInCorso}
+                                        </div>
+                                        ${p.completata
+                                            ? `<div class="text-2xl font-bold text-yellow-400 mt-1">${p.punteggioA} - ${p.punteggioB}</div>`
+                                            : `<div class="text-xs text-gray-500 mt-1 flex flex-wrap gap-2">
+                                                ${p.arbitroAssegnato ? `<span class="bg-blue-900 text-blue-300 px-2 py-0.5 rounded-full">👤 ${p.arbitroAssegnato.split('@')[0]}</span>` : ''}
+                                                ${arbitroAttivo ? `<span class="text-orange-400">🟠 ${p.arbitroAttivo.split('@')[0]} sta arbitrando</span>` : ''}
+                                               </div>`
+                                        }
+                                    </div>
+                                    <div class="flex flex-col gap-2 items-end">
+                                        <span class="px-3 py-1 rounded-full text-sm font-semibold ${badgeCls}">${badgeTxt}</span>
+                                        ${p.completata ? `
+    <button onclick="app.generaPDF(${p.id})" class="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded text-sm font-semibold">📄 PDF</button>
+    <button onclick="app.inviaRefertoTelegram(${p.id})" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded text-sm font-semibold">✈️ Telegram</button>
+` : ''}
+                                    </div>
+                                </div>
+                                ${!p.completata
+                                    ? accessibile
+                                        ? `<button onclick="app.apriPartita(${p.id})" class="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-semibold py-2 px-4 rounded">
+                                               ${arbitroAttivo && p.arbitroAttivo !== this.emailUtente ? '🔒 Apri (in uso)' : '✏️ Gestisci'}
+                                           </button>`
+                                        : `<div class="text-center text-gray-500 text-sm py-2">🔒 Assegnata a ${p.arbitroAssegnato.split('@')[0]}</div>`
+                                    : `<button onclick="app.partitaSelezionata=${p.id};app.render()" class="w-full bg-gray-600 hover:bg-gray-700 text-white font-semibold py-2 px-4 rounded">👁️ Visualizza</button>`
+                                }
+                            </div>`;
+                        }).join('')}
+                    </div>
+                </div>`).join('');
+        },
+
+        /* ----------------------------------------------------------------
+           3E — SQUADRE
+           ---------------------------------------------------------------- */
+
+        renderSquadre() {
+            const lista = Object.keys(this.squadre).sort();
+            document.getElementById('contenuto').innerHTML = `
+                <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                    <div class="flex justify-between items-center mb-4 flex-wrap gap-2">
+                        <h2 class="text-xl font-semibold text-cyan-400">Gestione Squadre</h2>
+                        ${this.isOrganizzatore() ? `
+                        <div class="flex gap-2">
+                            <button onclick="app.importaSquadre()"        class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded font-semibold text-sm">🔥 Import</button>
+                            <button onclick="app.aggiungiSquadraManuale()" class="bg-cyan-600 hover:bg-cyan-700 text-white px-4 py-2 rounded font-semibold text-sm">➕ Aggiungi</button>
+                        </div>` : ''}
+                    </div>
+                    ${lista.length === 0 ? '<p class="text-center text-gray-500 py-12">Nessuna squadra</p>' : `
+                        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            ${lista.map(nome => `
+                                <div class="bg-gray-700 rounded-lg p-4">
+                                    <div class="flex items-center gap-3 mb-3">
+                                    ${this.imgLogo(nome, 'w-10 h-10 object-contain rounded-lg bg-gray-600 p-1')}
+                                    <h3 class="font-bold text-lg text-cyan-300">${nome}</h3>
+                                    </div>
+                                    <div class="space-y-1 max-h-48 overflow-y-auto">
+                                        ${this.squadre[nome].map(g => `
+                                            <div class="text-sm bg-gray-600 rounded px-2 py-1">
+                                                <span class="font-semibold text-cyan-400">${g.numero}</span> - ${g.nome}
+                                            </div>`).join('')}
+                                    </div>
+                                    <div class="mt-2 text-xs text-gray-400">${this.squadre[nome].length} giocatori</div>
+                                </div>`).join('')}
+                        </div>`}
+                </div>`;
+        },
+
+        /* ----------------------------------------------------------------
+           3F — CLASSIFICA
+           ---------------------------------------------------------------- */
+
+        renderClassifica() {
+            const cls = this.calcolaClassifica();
+            if (cls.length === 0) { document.getElementById('contenuto').innerHTML = '<p class="text-center text-gray-500 py-12">Nessuna partita completata</p>'; return; }
+            document.getElementById('contenuto').innerHTML = `
+                <div class="bg-gray-800 rounded-lg shadow-xl border border-gray-700 overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-gray-700">
+                                <tr>${['Pos','Squadra','Pt','G','V','N','P','GF','GS','DR'].map(h =>
+                                    `<th class="px-4 py-3 ${h==='Squadra'?'text-left':'text-center'} text-cyan-400 font-semibold">${h}</th>`).join('')}</tr>
+                            </thead>
+                            <tbody>
+                                ${cls.map((s,i) => {
+                                    const dr = s.gf - s.gs;
+                                    return `<tr class="border-t border-gray-700 ${i<3?'bg-green-900 bg-opacity-20':''}">
+                                        <td class="px-4 py-3 font-bold ${i===0?'text-yellow-400':i===1?'text-gray-300':i===2?'text-orange-400':'text-gray-400'}">${i+1}</td>
+                                        <td class="px-4 py-3 font-semibold">
+    <div class="flex items-center gap-2">
+        ${this.imgLogo(s.nome, 'w-6 h-6 object-contain rounded')}
+        ${s.nome}
+    </div>
+</td>
+                                        <td class="px-4 py-3 text-center font-bold text-cyan-400">${s.punti}</td>
+                                        <td class="px-4 py-3 text-center">${s.giocate}</td>
+                                        <td class="px-4 py-3 text-center text-green-400">${s.vinte}</td>
+                                        <td class="px-4 py-3 text-center text-yellow-400">${s.pareggiate}</td>
+                                        <td class="px-4 py-3 text-center text-red-400">${s.perse}</td>
+                                        <td class="px-4 py-3 text-center">${s.gf}</td>
+                                        <td class="px-4 py-3 text-center">${s.gs}</td>
+                                        <td class="px-4 py-3 text-center font-semibold ${dr>0?'text-green-400':dr<0?'text-red-400':''}">${dr>0?'+':''}${dr}</td>
+                                    </tr>`;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>`;
+        },
+
+        /* ----------------------------------------------------------------
+           3G — STATISTICHE
+           ---------------------------------------------------------------- */
+
+renderStatistiche() {
+    const stats = this.calcolaStatistiche();
+    const colorePos = (i) => i===0?'text-yellow-400 text-lg':i===1?'text-gray-300':i===2?'text-orange-400':'text-gray-400';
+
+    const lista = (arr, campo, colore) => {
+        if (arr.length === 0) return '<p class="text-gray-500">Nessun dato</p>';
+        return `<div class="space-y-2 max-h-96 overflow-y-auto">${arr.map((item,i) => `
+            <div class="flex justify-between items-center bg-gray-700 rounded px-4 py-3">
+                <div class="flex items-center gap-3">
+                    <span class="font-bold ${colorePos(i)}">${i+1}</span>
+                    <div><div class="text-white text-sm font-medium">${item.nome}</div>
+                        <div class="text-xs text-gray-500">${item.squadra}</div></div>
+                </div>
+                <span class="${colore} px-3 py-1 rounded-full font-bold text-sm">${item[campo]}${campo==='volte'?'x':''}</span>
+            </div>`).join('')}</div>`;
+    };
+
+    const listaSquadre = (arr, colore) => {
+        if (arr.length === 0) return '<p class="text-gray-500">Nessun dato</p>';
+        return `<div class="space-y-2 max-h-96 overflow-y-auto">${arr.map((item,i) => `
+            <div class="flex justify-between items-center bg-gray-700 rounded px-4 py-3">
+                <div class="flex items-center gap-3">
+                    <span class="font-bold ${colorePos(i)}">${i+1}</span>
+                    ${this.imgLogo(item.nome, 'w-6 h-6 object-contain rounded')}
+                    <div><div class="text-white text-sm font-medium">${item.nome}</div>
+                        <div class="text-xs text-gray-500">${item.partite} ${item.partite===1?'partita':'partite'} • media ${(item.valore/item.partite).toFixed(1)}</div></div>
+                </div>
+                <span class="${colore} px-3 py-1 rounded-full font-bold text-sm">${item.valore}</span>
+            </div>`).join('')}</div>`;
+    };
+
+    document.getElementById('contenuto').innerHTML = `
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                <h2 class="text-xl font-semibold mb-4 text-cyan-400">⚽ Marcatori (${stats.marcatori.length})</h2>
+                ${lista(stats.marcatori,'gol','bg-cyan-900 text-cyan-300')}
+            </div>
+            <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                <h2 class="text-xl font-semibold mb-4 text-cyan-400">🔪 Scalpatori (${stats.scalpatori.length})</h2>
+                ${lista(stats.scalpatori,'scalpi','bg-red-900 text-red-300')}
+            </div>
+            <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                <h2 class="text-xl font-semibold mb-4 text-cyan-400">🔵 Vuoti di squadra (${stats.vuotiSquadre.length})</h2>
+                ${listaSquadre(stats.vuotiSquadre,'bg-blue-900 text-blue-300')}
+            </div>
+            <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                <h2 class="text-xl font-semibold mb-4 text-cyan-400">⚠️ Falli di difesa (${stats.falliSquadre.length})</h2>
+                ${listaSquadre(stats.falliSquadre,'bg-orange-900 text-orange-300')}
+            </div>
+            <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700 md:col-span-2">
+                <h2 class="text-xl font-semibold mb-4 text-cyan-400">⭐ MVP (${stats.mvps.length})</h2>
+                ${lista(stats.mvps,'volte','bg-purple-900 text-purple-300')}
+            </div>
+        </div>`;
+},
+
+        /* ----------------------------------------------------------------
+           3H — PANNELLO ADMIN (solo organizzatori)
+           ---------------------------------------------------------------- */
+
+        renderAdmin() {
+            if (!this.isOrganizzatore()) { this.vista = 'partite'; this.render(); return; }
+
+            // Carica tutti gli arbitri inclusi quelli disabilitati
+            supabase.from('arbitri').select('*').order('created_at', { ascending: true }).then(({ data }) => {
+                const tutti = data || [];
+
+                document.getElementById('contenuto').innerHTML = `
+                    <div class="space-y-8">
+
+                        <!-- Gestione arbitri -->
+                        <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                            <h2 class="text-xl font-semibold text-cyan-400 mb-6">👥 Gestione Arbitri</h2>
+
+                            <!-- Form aggiungi arbitro -->
+                            <div class="bg-gray-700 rounded-lg p-4 mb-6">
+                                <h3 class="font-semibold text-gray-200 mb-4">➕ Aggiungi Arbitro</h3>
+                                <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                    <input type="email" id="admin-email" placeholder="email@esempio.it"
+                                        class="bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white text-sm">
+                                    <input type="text" id="admin-nome" placeholder="Nome cognome"
+                                        class="bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white text-sm">
+                                    <input type="hidden" id="admin-ruolo" value="arbitro">
+                                    <button onclick="app._adminSubmitArbitro()" class="bg-cyan-600 hover:bg-cyan-700 text-white font-semibold px-4 py-2 rounded text-sm">
+                                        Aggiungi
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Lista arbitri -->
+                            <div class="space-y-2">
+                                ${tutti.map(a => `
+                                    <div class="flex items-center justify-between bg-gray-700 rounded-lg px-4 py-3 ${!a.attivo ? 'opacity-50' : ''}">
+                                        <div>
+                                            <span class="font-medium text-white">${a.email}</span>
+                                            ${a.nome ? `<span class="text-gray-400 text-sm ml-2">(${a.nome})</span>` : ''}
+                                            <span class="ml-2 text-xs px-2 py-0.5 rounded-full ${a.ruolo === 'organizzatore' ? 'bg-purple-700 text-purple-200' : 'bg-gray-600 text-gray-300'}">${a.ruolo}</span>
+                                            ${!a.attivo ? '<span class="ml-2 text-xs text-red-400">disabilitato</span>' : ''}
+                                        </div>
+                                        <div class="flex gap-2">
+                                            
+                                            <button onclick="app.adminToggleArbitro('${a.email}', ${a.attivo})"
+                                                class="text-xs ${a.attivo ? 'bg-red-700 hover:bg-red-600' : 'bg-green-700 hover:bg-green-600'} text-white px-2 py-1 rounded">
+                                                ${a.attivo ? 'Disabilita' : 'Abilita'}
+                                            </button>
+                                        </div>
+                                    </div>`).join('')}
+                            </div>
+                        </div>
+
+                        <!-- Assegnazione partite -->
+                        <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                            <h2 class="text-xl font-semibold text-cyan-400 mb-6">📋 Assegnazione Partite</h2>
+                            <div class="space-y-3">
+                                ${this.partite.filter(p => !p.completata).map(p => {
+                                    const arbitriAttivi = this.arbitriLista.filter(a => a.attivo);
+                                    return `
+                                    <div class="bg-gray-700 rounded-lg px-4 py-3">
+                                        <div class="flex items-center justify-between flex-wrap gap-3">
+                                            <div>
+                                                <span class="font-semibold text-white">${p.squadraA} vs ${p.squadraB}</span>
+                                                <span class="text-gray-400 text-sm ml-2">Campo ${p.campo} • ${p.orario}</span>
+                                            </div>
+                                            <div class="flex items-center gap-2">
+                                                <select id="assegna-${p.id}" class="bg-gray-600 border border-gray-500 rounded px-3 py-1.5 text-white text-sm">
+                                                    <option value="">-- Nessuno --</option>
+                                                    ${arbitriAttivi.map(a => `<option value="${a.email}" ${p.arbitroAssegnato===a.email?'selected':''}>${a.nome||a.email.split('@')[0]}</option>`).join('')}
+                                                </select>
+                                                <button onclick="app.assegnaArbitro(${p.id}, document.getElementById('assegna-${p.id}').value)"
+                                                    class="bg-cyan-600 hover:bg-cyan-700 text-white text-sm px-3 py-1.5 rounded font-semibold">
+                                                    Salva
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>`;
+                                }).join('')}
+                                ${this.partite.filter(p=>!p.completata).length === 0 ? '<p class="text-gray-500 text-center py-4">Nessuna partita da assegnare</p>' : ''}
+                            </div>
+                        </div>
+
+                        <!-- Eliminazione partite -->
+                        <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-red-900">
+                            <h2 class="text-xl font-semibold text-red-400 mb-4">🗑️ Elimina Partite</h2>
+                            <p class="text-gray-400 text-sm mb-4">Attenzione: l'eliminazione è irreversibile.</p>
+                            <div class="space-y-2">
+                                ${this.partite.map(p => `
+                                    <div class="flex items-center justify-between bg-gray-700 rounded-lg px-4 py-3">
+                                        <div>
+                                            <span class="font-medium text-white">${p.squadraA} vs ${p.squadraB}</span>
+                                            <span class="text-gray-400 text-sm ml-2">C${p.campo} • ${p.orario}</span>
+                                            ${p.completata ? '<span class="ml-2 text-xs text-green-400">✓ completata</span>' : ''}
+                                        </div>
+                                        <button onclick="app.eliminaPartita(${p.id})"
+                                            class="text-xs bg-red-700 hover:bg-red-600 text-white px-3 py-1.5 rounded font-semibold">
+                                            Elimina
+                                        </button>
+                                    </div>`).join('')}
+                                ${this.partite.length === 0 ? '<p class="text-gray-500 text-center py-4">Nessuna partita</p>' : ''}
+                            </div>
+                        </div>
+                    </div>`;
+            });
+        },
+
+        /** Helper per il form aggiungi arbitro */
+        _adminSubmitArbitro() {
+            const email = document.getElementById('admin-email').value.trim();
+            const nome  = document.getElementById('admin-nome').value.trim();
+            const ruolo = document.getElementById('admin-ruolo').value;
+            if (!email) { alert('Inserisci una email valida'); return; }
+            this.adminAggiungiArbitro(email, nome, ruolo);
+        },
+
+        /* ----------------------------------------------------------------
+           3I — FORM PARTITA IN CORSO
+           ---------------------------------------------------------------- */
+
+        renderFormPartita() {
+            const p = this.partite.find(x => x.id === this.partitaSelezionata);
+            if (!p) return;
+
+            const giocatoriA = this.squadre[p.squadraA] || [];
+            const giocatoriB = this.squadre[p.squadraB] || [];
+
+            const secondiMostrati = p.timerAttivo
+                ? p.timerSecondi + Math.floor((Date.now() - p.timerTimestamp) / 1000)
+                : p.timerSecondi;
+
+            const durataBase  = p.timerTempo >= 3 ? DURATA_TEMPO_EXTRA : DURATA_TEMPO_STD;
+            const recupero    = p.timerTempo === 1 ? p.recupero1Tempo : p.recupero2Tempo;
+            const tempoTotale = durataBase + (recupero * 60);
+            const percentuale = Math.min((secondiMostrati / tempoTotale) * 100, 100);
+
+            const vuotiPerGiocatoreA = {};
+            const vuotiPerGiocatoreB = {};
+            p.vuotiA.forEach(v => { const n = this._nomeGiocatore(v); vuotiPerGiocatoreA[n] = (vuotiPerGiocatoreA[n]||0)+1; });
+            p.vuotiB.forEach(v => { const n = this._nomeGiocatore(v); vuotiPerGiocatoreB[n] = (vuotiPerGiocatoreB[n]||0)+1; });
+
+            const tempoLabel = p.timerTempo===1?'Tempo 1/2':p.timerTempo===2?'Tempo 2/2':p.timerTempo===3?'⚡ Silver Meta':'🥇 Golden Meta';
+
+            const btnCambioTempo = p.timerTempo === 1 ? `
+                <div class="mt-3 pt-3 border-t border-gray-600">
+                    <button onclick="app.passaAlSecondoTempoManuale(${p.id})" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded font-bold text-sm border-2 border-indigo-400">⏭ Passa al 2° Tempo</button>
+                </div>` :
+            p.timerTempo === 2 ? `
+                <div class="mt-3 pt-3 border-t border-gray-600">
+                    ${p.punteggioA === p.punteggioB
+                        ? `<button onclick="app.passaAllaSilverMeta(${p.id})" class="w-full bg-yellow-600 hover:bg-yellow-500 text-white px-3 py-2 rounded font-bold text-sm border-2 border-yellow-400">⚡ Silver Meta (parità)</button>`
+                        : `<div class="text-xs text-gray-500 text-center py-1">Silver Meta non disponibile (non in parità)</div>`}
+                </div>` :
+            p.timerTempo === 3 ? `
+                <div class="mt-3 pt-3 border-t border-gray-600">
+                    ${p.punteggioA === p.punteggioB
+                        ? `<button onclick="app.passaAllaGoldenMeta(${p.id})" class="w-full bg-amber-500 hover:bg-amber-400 text-white px-3 py-2 rounded font-bold text-sm border-2 border-amber-300">🥇 Golden Meta (ancora parità)</button>`
+                        : `<div class="text-xs text-gray-500 text-center py-1">Golden Meta non disponibile (non in parità)</div>`}
+                </div>` : '';
+
+            document.getElementById('app').innerHTML = `
+                <div class="max-w-6xl mx-auto p-4">
+                    <button onclick="app.partitaSelezionata=null;app.rilasciaControlloPartita(${p.id});if(app.timerInterval)clearInterval(app.timerInterval);app.render()"
+                        class="mb-6 text-cyan-400 hover:text-cyan-300 flex items-center gap-2 font-semibold">
+                        ← Torna alla lista
+                    </button>
+
+                    <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700 mb-6">
+                        <div class="flex justify-between items-start mb-4 flex-wrap gap-4">
+                            <div>
+                                <h1 class="text-2xl font-bold">Campo ${p.campo} • ${p.orario}</h1>
+                                <p class="text-gray-400 mt-1 flex items-center gap-2">
+    ${this.imgLogo(p.squadraA, 'w-6 h-6 object-contain')}
+    ${p.squadraA}
+    <span class="text-gray-600">vs</span>
+    ${p.squadraB}
+    ${this.imgLogo(p.squadraB, 'w-6 h-6 object-contain')}
+</p>
+                                ${p.arbitroAssegnato ? `<p class="text-blue-400 text-sm mt-1">👤 Arbitro: ${p.arbitroAssegnato}</p>` : ''}
+                            </div>
+                            <div>
+                                ${p.completata ? `
+                                    <div class="text-3xl font-bold text-yellow-400">${p.punteggioA} - ${p.punteggioB}</div>
+                                    <span class="text-green-300 text-sm">✓ Completata</span>` : `
+                                    <div class="bg-gray-700 rounded-lg p-4 text-center min-w-[200px]">
+                                        <div id="timer-display" class="text-4xl font-bold ${p.timerAttivo?'text-red-400 timer-active':'text-cyan-400'} mb-2 font-mono">${this.formatoTempo(secondiMostrati)}</div>
+                                        <div id="tempo-display" class="text-sm text-gray-300 mb-1">${tempoLabel}</div>
+                                        <div id="recupero-display" class="text-xs text-orange-400 font-bold mb-3 ${secondiMostrati>DURATA_TEMPO_STD?'':'hidden'}">+${Math.floor((secondiMostrati-DURATA_TEMPO_STD)/60)+1}'</div>
+                                        <div class="w-full bg-gray-600 rounded-full h-2 mb-3">
+                                            <div id="progress-bar" class="progress-bar h-full ${percentuale>90?'bg-red-500':percentuale>75?'bg-orange-500':'bg-cyan-500'} rounded-full" style="width:${percentuale}%"></div>
+                                        </div>
+                                        <div class="flex gap-2 mb-2">
+                                            ${!p.timerAttivo
+                                                ? `<button onclick="app.avviaTimer(${p.id})" class="flex-1 bg-green-500 hover:bg-green-400 text-white px-3 py-2 rounded font-bold text-base border-2 border-green-300 shadow-lg">▶ ${p.timerSecondi>0?'Riprendi':'Avvia'}</button>`
+                                                : `<button onclick="app.pausaTimer(${p.id})" class="flex-1 bg-orange-500 hover:bg-orange-400 text-white px-3 py-2 rounded font-bold text-base border-2 border-orange-300 shadow-lg">⏸ Pausa</button>`}
+                                            ${p.timerSecondi>0||p.timerAttivo ? `<button onclick="app.fermaTimer(${p.id})" class="flex-1 bg-red-500 hover:bg-red-400 text-white px-3 py-2 rounded font-bold text-base border-2 border-red-300 shadow-lg">⏹ Reset</button>` : ''}
+                                        </div>
+                                        <div class="flex gap-2">
+                                            ${[1,2,3].map(m=>`<button onclick="app.aggiungiRecupero(${p.id},${m})" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs">+${m}' rec</button>`).join('')}
+                                        </div>
+                                        ${recupero>0?`<div class="text-xs text-gray-400 mt-2">Recupero: ${recupero}'</div>`:''}
+                                        ${btnCambioTempo}
+                                    </div>`}
+                            </div>
+                        </div>
+                    </div>
+
+                    ${!p.completata ? `
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                            ${this.renderSezioneSegnata(p,'A',giocatoriA,vuotiPerGiocatoreA)}
+                            ${this.renderSezioneSegnata(p,'B',giocatoriB,vuotiPerGiocatoreB)}
+                        </div>
+                        <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                            <button onclick="app.finalizzaPartitaForm(${p.id})" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-4 px-6 rounded text-lg">
+                                🏁 Finalizza Partita
+                            </button>
+                        </div>` : `
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                            ${this.renderRiepilogo(p,'A')}
+                            ${this.renderRiepilogo(p,'B')}
+                        </div>
+                        <div class="text-center">
+<div class="flex gap-3 justify-center">
+    <button onclick="app.generaPDF(${p.id})" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded text-lg">📄 Scarica PDF</button>
+    <button onclick="app.inviaRefertoTelegram(${p.id})" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded text-lg">✈️ Invia su Telegram</button>
+</div>
+                        </div>`}
+                </div>`;
+        },
+
+        /* ----------------------------------------------------------------
+           3J — SEZIONE SQUADRA (gol, scalpi, vuoti, cartellini, falli)
+           ---------------------------------------------------------------- */
+
+        renderSezioneSegnata(p, squadra, giocatori, vuotiPerGiocatore) {
+            const nome       = p[`squadra${squadra}`];
+            const gol        = p[`gol${squadra}`];
+            const scalpi     = p[`scalpi${squadra}`];
+            const vuoti      = p[`vuoti${squadra}`];
+            const espulsi    = p[`espulsi${squadra}`];
+            const cartellini = p[`cartellini${squadra}`];
+            const stato = (gNome) => this._statoGiocatore(gNome, squadra, nome, p);
+
+            const selGiocatori = (inputId, mostraCnt = false) => giocatori.length > 0
+                ? `<select id="${inputId}" class="flex-1 bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white">
+                       <option value="">-- Seleziona --</option>
+                       ${giocatori.map(g => {
+                           const gNome = `${g.numero} - ${g.nome}`;
+                           const { disabilitato, motivo } = stato(gNome);
+                           const cnt = mostraCnt ? (vuotiPerGiocatore[gNome]||0) : 0;
+                           return `<option value="${gNome}" ${disabilitato?'disabled':''}>${gNome}${cnt>0?` (${cnt})`:''}${motivo?' '+motivo:''}</option>`;
+                       }).join('')}
+                   </select>`
+                : `<input type="text" id="${inputId}" placeholder="Nome" class="flex-1 bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white">`;
+
+            const vuotiSquadra = p[`vuotiSquadra${squadra}`];
+            const falliDifesa  = p[`falliDifesa${squadra}`];
+            const limiteVuoti  = p.timerTempo >= 3 ? LIMITE_VUOTI_EXTRA : LIMITE_VUOTI_STD;
+
+            return `
+            <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-2xl font-bold text-cyan-300">${nome}</h2>
+                    <div class="text-4xl font-bold text-yellow-400">${p[`punteggio${squadra}`]}</div>
+                </div>
+
+                ${espulsi.length > 0 ? `
+                    <div class="mb-6 bg-red-900 bg-opacity-30 border border-red-700 rounded-lg p-4">
+                        <div class="flex items-center gap-2 mb-3"><span class="text-red-400 text-xl">🟥</span><span class="font-bold text-red-300">Espulsi (${espulsi.length})</span></div>
+                        <div class="space-y-2">${espulsi.map(e=>`
+                            <div class="bg-red-900 bg-opacity-40 rounded px-3 py-2 flex justify-between items-center">
+                                <span class="text-red-200">${e}</span>
+                                <button onclick="app.rientraEspulso(${p.id},'${squadra}','${e}')" class="text-green-400 hover:text-green-300 text-xs font-semibold">Rientra</button>
+                            </div>`).join('')}
+                        </div>
+                    </div>` : ''}
+
+                <!-- GOL -->
+                <div class="mb-5">
+                    <div class="flex items-center gap-2 mb-3"><span class="text-yellow-400 text-xl">⚽</span><span class="font-bold text-gray-200">Gol (${gol.length})</span></div>
+                    <div class="flex gap-2 mb-2">${selGiocatori(`gol-${squadra}-${p.id}`)}
+                        <button onclick="app.aggiungiElemento(${p.id},'${squadra}','gol')" class="bg-cyan-600 hover:bg-cyan-700 text-white px-4 py-2 rounded font-bold">+</button></div>
+                    <div class="space-y-1 max-h-32 overflow-y-auto">
+                        ${gol.map((ev,i)=>{
+                            const g = this._nomeGiocatore(ev);
+                            const min = typeof ev==='object'&&ev.minuto ? `<span class="text-gray-500 text-xs ml-1">${ev.minuto} T${ev.tempo}</span>` : '';
+                            return `<div class="bg-gray-700 rounded px-3 py-1.5 flex justify-between items-center text-sm">
+                                <span>⚽ ${g}${min}</span>
+                                <button onclick="app.rimuoviElemento(${p.id},'${squadra}','gol',${i})" class="text-red-400 hover:text-red-300">✕</button>
+                            </div>`;
+                        }).join('')}
+                    </div>
+                </div>
+
+                <!-- SCALPI -->
+                <div class="mb-5">
+                    <div class="flex items-center gap-2 mb-3"><span class="text-red-400 text-xl">🔪</span><span class="font-bold text-gray-200">Scalpi (${scalpi.length})</span></div>
+                    <div class="flex gap-2 mb-2">${selGiocatori(`scalpo-${squadra}-${p.id}`)}
+                        <button onclick="app.aggiungiElemento(${p.id},'${squadra}','scalpo')" class="bg-cyan-600 hover:bg-cyan-700 text-white px-4 py-2 rounded font-bold">+</button></div>
+                    <div class="space-y-1 max-h-32 overflow-y-auto">
+                        ${scalpi.map((ev,i)=>{
+                            const s = this._nomeGiocatore(ev);
+                            const min = typeof ev==='object'&&ev.minuto ? `<span class="text-gray-500 text-xs ml-1">${ev.minuto} T${ev.tempo}</span>` : '';
+                            return `<div class="bg-gray-700 rounded px-3 py-1.5 flex justify-between items-center text-sm">
+                                <span>🔪 ${s}${min}</span>
+                                <button onclick="app.rimuoviElemento(${p.id},'${squadra}','scalpo',${i})" class="text-red-400 hover:text-red-300">✕</button>
+                            </div>`;
+                        }).join('')}
+                    </div>
+                </div>
+
+                <!-- VUOTI -->
+                <div class="mb-5">
+                    <div class="flex items-center justify-between mb-3">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="text-blue-400 text-xl">🔵</span>
+                            <span class="font-bold text-gray-200">Vuoti (${vuoti.length})</span>
+                            ${p.timerTempo>=3?`<span class="text-xs bg-yellow-600 text-white px-2 py-0.5 rounded-full">lim: ${limiteVuoti}</span>`:''}
+                            <span class="text-xs ${vuotiSquadra>=SOGLIA_FALLO_VUOTI?'text-orange-400':'text-gray-500'}">
+                                | Sq: ${vuotiSquadra} ${vuotiSquadra>=SOGLIA_FALLO_VUOTI?`(prox fallo al ${SOGLIA_FALLO_VUOTI+(Math.floor((vuotiSquadra-SOGLIA_FALLO_VUOTI)/3)+1)*3}°)`:`(${SOGLIA_FALLO_VUOTI-vuotiSquadra} al 1° fallo)`}
+                            </span>
+                        </div>
+                        ${vuoti.length>0?`<button onclick="app.azzeraVuoti(${p.id},'${squadra}')" class="text-xs bg-orange-600 hover:bg-orange-700 text-white px-2 py-1 rounded">Azzera</button>`:''}
+                    </div>
+                    <div class="flex gap-2 mb-2">${selGiocatori(`vuoto-${squadra}-${p.id}`, true)}
+                        <button onclick="app.aggiungiVuotoBtn(${p.id},'${squadra}')" class="bg-cyan-600 hover:bg-cyan-700 text-white px-4 py-2 rounded font-bold">+</button></div>
+                    <div class="space-y-1 max-h-28 overflow-y-auto">
+                        ${vuoti.map((ev,i)=>{
+                            const v   = this._nomeGiocatore(ev);
+                            const cnt = vuotiPerGiocatore[v]||0;
+                            const min = typeof ev==='object'&&ev.minuto ? `<span class="text-gray-500 text-xs ml-1">${ev.minuto} T${ev.tempo}</span>` : '';
+                            return `<div class="bg-gray-700 rounded px-3 py-1.5 flex justify-between items-center text-sm ${cnt>=limiteVuoti?'border border-red-500':''}">
+                                <span>🔵 ${v}${min} ${cnt>=(limiteVuoti-1)?`<span class="text-orange-400 font-bold">(${cnt}/${limiteVuoti})</span>`:''}</span>
+                                <button onclick="app.rimuoviElemento(${p.id},'${squadra}','vuoto',${i})" class="text-red-400 hover:text-red-300">✕</button>
+                            </div>`;
+                        }).join('')}
+                    </div>
+                </div>
+
+                <!-- CARTELLINI -->
+                <div class="mb-5 border-t border-gray-700 pt-5">
+                    <div class="flex items-center gap-2 mb-3"><span class="text-xl">🟨</span><span class="font-bold text-gray-200">Cartellini</span></div>
+                    <div class="mb-2">${selGiocatori(`cartellino-giocatore-${squadra}-${p.id}`)}</div>
+                    <div class="flex gap-2 mb-2">
+                        ${[['giallo','bg-yellow-500 hover:bg-yellow-400 text-black border-yellow-300','🟨'],
+                           ['rosso', 'bg-red-600 hover:bg-red-500 text-white border-red-400',         '🟥'],
+                           ['nero',  'bg-gray-900 hover:bg-gray-800 text-white border-gray-500',       '⬛']].map(([tipo,cls,ico])=>`
+                            <button onclick="(()=>{const el=document.getElementById('cartellino-giocatore-${squadra}-${p.id}');const v=el.tagName==='SELECT'?el.value:el.value.trim();if(!v)return;app.aggiungiCartellino(${p.id},'${squadra}',v,'${tipo}');el.value='';})()"
+                                class="flex-1 ${cls} px-2 py-2 rounded font-bold text-sm border-2">${ico}</button>`).join('')}
+                    </div>
+                    <div class="space-y-1 max-h-28 overflow-y-auto">
+                        ${cartellini.map((c,i)=>`
+                            <div class="rounded px-3 py-1.5 flex justify-between items-center text-sm ${c.tipo==='giallo'?'bg-yellow-900 bg-opacity-40 border border-yellow-700':c.tipo==='rosso'?'bg-red-900 bg-opacity-40 border border-red-700':'bg-gray-900 border border-gray-600'}">
+                                <span class="${c.tipo==='giallo'?'text-yellow-200':c.tipo==='rosso'?'text-red-200':'text-gray-200'}">
+                                    ${c.tipo==='giallo'?'🟨':c.tipo==='rosso'?'🟥':'⬛'} ${c.giocatore}
+                                    ${c.minuto?`<span class="text-xs opacity-60 ml-1">${c.minuto} T${c.tempo}</span>`:''}
+                                    <span class="text-xs opacity-60">(${c.tipo==='giallo'?'Escl. T'+c.tempo:c.tipo==='rosso'?'partita':'torneo'})</span>
+                                </span>
+                                <button onclick="app.rimuoviCartellino(${p.id},'${squadra}',${i})" class="text-red-400 hover:text-red-300 ml-2">✕</button>
+                            </div>`).join('')}
+                    </div>
+                </div>
+
+                <!-- FALLI DI DIFESA -->
+                <div class="border-t border-gray-700 pt-5">
+                    <div class="flex items-center justify-between mb-3">
+                        <div class="flex items-center gap-2"><span class="text-orange-400 text-xl">⚠️</span><span class="font-bold text-gray-200">Falli di Difesa</span></div>
+                        <div class="text-2xl font-bold ${falliDifesa>=2?'text-red-400 animate-pulse':'text-orange-400'}">${falliDifesa}/${FALLI_PER_META}</div>
+                    </div>
+                    <button onclick="app.aggiungiFalloDifesa(${p.id},'${squadra}')"
+                        class="w-full ${falliDifesa>=2?'bg-red-600 hover:bg-red-700':'bg-orange-600 hover:bg-orange-700'} text-white px-4 py-2 rounded font-bold">
+                        + Aggiungi Fallo
+                    </button>
+                    ${falliDifesa===2?'<p class="text-xs text-red-400 mt-2 text-center font-bold animate-pulse">🚨 Prossimo fallo = METÀ!</p>':falliDifesa===1?'<p class="text-xs text-orange-400 mt-2 text-center">⚠️ 1 fallo registrato</p>':''}
+                </div>
+            </div>`;
+        },
+
+        /* ----------------------------------------------------------------
+           3K — RIEPILOGO PARTITA COMPLETATA
+           ---------------------------------------------------------------- */
+
+        renderRiepilogo(p, squadra) {
+            const nome     = p[`squadra${squadra}`];
+            const gol      = p[`gol${squadra}`];
+            const scalpi   = p[`scalpi${squadra}`];
+            const cartellini = p[`cartellini${squadra}`];
+            const mvp      = p[`mvp${squadra}`];
+
+            return `
+            <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                <h2 class="text-2xl font-bold text-cyan-300 mb-4">${nome}</h2>
+                <div class="text-4xl font-bold text-yellow-400 mb-6">${p[`punteggio${squadra}`]}</div>
+
+                <div class="mb-5">
+                    <div class="text-sm text-gray-400 mb-2">Gol: ${gol.length}</div>
+                    <div class="bg-gray-700 rounded p-3 text-sm space-y-1">
+                        ${gol.length>0 ? gol.map(ev=>{
+                            const g   = this._nomeGiocatore(ev);
+                            const min = typeof ev==='object'&&ev.minuto?`<span class="text-gray-500 text-xs ml-1">${ev.minuto} T${ev.tempo}</span>`:'';
+                            return `<div class="${g.includes('META')?'text-orange-300':'text-cyan-300'}">${g.includes('META')?'🏅':'⚽'} ${g}${min}</div>`;
+                        }).join('') : '<div class="text-gray-500">Nessun gol</div>'}
+                    </div>
+                </div>
+
+                <div class="mb-5">
+                    <div class="text-sm text-gray-400 mb-2">Scalpi: ${scalpi.length}</div>
+                    <div class="bg-gray-700 rounded p-3 text-sm space-y-1">
+                        ${scalpi.length>0 ? scalpi.map(ev=>{
+                            const s   = this._nomeGiocatore(ev);
+                            const min = typeof ev==='object'&&ev.minuto?`<span class="text-gray-500 text-xs ml-1">${ev.minuto} T${ev.tempo}</span>`:'';
+                            return `<div class="text-red-300">🔪 ${s}${min}</div>`;
+                        }).join('') : '<div class="text-gray-500">Nessuno scalpo</div>'}
+                    </div>
+                </div>
+
+                ${cartellini.length>0?`
+                <div class="mb-5">
+                    <div class="text-sm text-gray-400 mb-2">Cartellini: ${cartellini.length}</div>
+                    <div class="bg-gray-700 rounded p-3 text-sm space-y-1">
+                        ${cartellini.map(c=>`
+                            <div class="${c.tipo==='giallo'?'text-yellow-300':c.tipo==='rosso'?'text-red-300':'text-gray-300'}">
+                                ${c.tipo==='giallo'?'🟨':c.tipo==='rosso'?'🟥':'⬛'} ${c.giocatore}
+                                ${c.minuto?`<span class="text-xs opacity-60 ml-1">${c.minuto} T${c.tempo}</span>`:''}
+                            </div>`).join('')}
+                    </div>
+                </div>`:''}
+
+                ${mvp?`
+                <div class="bg-purple-900 bg-opacity-40 border border-purple-700 rounded-lg p-4">
+                    <div class="text-sm text-gray-400 mb-1">MVP</div>
+                    <div class="text-lg font-bold text-purple-300">⭐ ${mvp}</div>
+                </div>`:''}
+            </div>`;
+        },
+
+        /* ----------------------------------------------------------------
+           3L — FORM FINALIZZAZIONE
+           ---------------------------------------------------------------- */
+
+        finalizzaPartitaForm(id) {
+            const p          = this.partite.find(x => x.id === id);
+            const giocatoriA = this.squadre[p.squadraA] || [];
+            const giocatoriB = this.squadre[p.squadraB] || [];
+
+            const selMvp = (inputId, giocatori) => `
+                <select id="${inputId}" class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white mb-3">
+                    <option value="">-- Nessun MVP --</option>
+                    ${giocatori.map(g=>`<option value="${g.numero} - ${g.nome}">${g.numero} - ${g.nome}</option>`).join('')}
+                </select>`;
+
+            document.getElementById('app').innerHTML = `
+                <div class="max-w-2xl mx-auto p-4">
+                    <button onclick="app.partitaSelezionata=${id};app.render()"
+                        class="mb-6 text-cyan-400 hover:text-cyan-300 flex items-center gap-2 font-semibold">← Torna al form</button>
+                    <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700 mb-6">
+                        <h1 class="text-2xl font-bold mb-1">Finalizza Partita</h1>
+                        <p class="text-gray-400">${p.squadraA} vs ${p.squadraB}</p>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                        <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                            <h2 class="text-xl font-bold text-cyan-300 mb-4">${p.squadraA}</h2>
+                            <label class="block text-sm mb-2 text-gray-300">Seleziona MVP</label>
+                            ${selMvp('mvp-select-a', giocatoriA)}
+                            <div id="preview-a" class="text-sm text-gray-400"></div>
+                        </div>
+                        <div class="bg-gray-800 rounded-lg p-6 shadow-xl border border-gray-700">
+                            <h2 class="text-xl font-bold text-cyan-300 mb-4">${p.squadraB}</h2>
+                            <label class="block text-sm mb-2 text-gray-300">Seleziona MVP</label>
+                            ${selMvp('mvp-select-b', giocatoriB)}
+                            <div id="preview-b" class="text-sm text-gray-400"></div>
+                        </div>
+                    </div>
+                    <button onclick="app.confermaSalvaPartita(${id})"
+                        class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-4 px-6 rounded text-lg">
+                        ✓ Salva e Finalizza
+                    </button>
+                </div>`;
+
+            document.getElementById('mvp-select-a').addEventListener('change', e =>
+                document.getElementById('preview-a').textContent = e.target.value ? `⭐ ${e.target.value}` : '');
+            document.getElementById('mvp-select-b').addEventListener('change', e =>
+                document.getElementById('preview-b').textContent = e.target.value ? `⭐ ${e.target.value}` : '');
+        },
+
+        // =============================================================
+        // FINE PARTE 3 — chiusura oggetto app e avvio
+        // =============================================================
+
+        }; // fine window.app
+
+        window.addEventListener('DOMContentLoaded', () => {
+            app.init();
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('./service-worker.js')
+                    .then(() => console.log('✓ PWA pronta'))
+                    .catch(err => console.log('Service Worker:', err));
+            }
+        });
+
+    </script>
+</body>
+</html>
