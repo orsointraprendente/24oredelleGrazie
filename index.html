@@ -1454,9 +1454,11 @@ async inviaRefertoTelegram(id) {
     const p = this.partite.find(x => x.id === id);
     if (!p) return;
 
-    try {
-        alert('⏳ Generazione referto in corso...');
+    const bottone = event?.target;
+    const testoOriginale = bottone ? bottone.textContent : null;
+    if (bottone) { bottone.disabled = true; bottone.textContent = '⏳ Invio...'; }
 
+    try {
         const pdfBlob  = await this.generaPDF(id, true);
         const nomeFile = `referto_${p.squadraA}_vs_${p.squadraB}.pdf`;
 
@@ -1480,9 +1482,12 @@ async inviaRefertoTelegram(id) {
     } catch (e) {
         console.error('Errore invio Telegram:', e);
         alert('❌ Errore durante l\'invio del referto: ' + e.message);
+    } finally {
+        if (bottone) { bottone.disabled = false; bottone.textContent = testoOriginale; }
     }
-},          
-        // =========================================================
+},
+			
+			// =========================================================
         // La PARTE 3 viene incollata qui sotto
         // =========================================================
 
