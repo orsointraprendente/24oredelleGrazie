@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0e7490">
+    <title>24OdG - Risultati Live</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .fade-in { animation: fadeIn 0.4s ease both; }
+
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; }
+            50%       { opacity: 0.3; }
+        }
+        .live-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+    </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+    <header class="bg-gray-900 border-b border-gray-800 sticky top-0 z-10">
+        <div class="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <h1 class="text-4xl font-bold font-serif">
+  <span class="text-[#1545cd]">2</span><span class="text-[#e51717]">4</span><span class="text-[#fbc205]">o</span><span class="text-[#1545cd]">r</span><span class="text-[#12b226]">e</span><span class="text-[#e51717]">d</span><span class="text-[#1545cd]">e</span><span class="text-[#fbc205]">l</span><span class="text-[#1545cd]">l</span><span class="text-[#12b226]">e</span><span class="text-[#12b226]">G</span><span class="text-[#1545cd]">r</span><span class="text-[#fbc205]">a</span><span class="text-[#1545cd]">z</span><span class="text-[#e51717]">i</span><span class="text-[#12b226]">e</span>
+</h1>
+                <span class="text-gray-500 text-sm">Risultati Live</span>
+            </div>
+            <div class="flex items-center gap-2 text-sm">
+                <span class="live-dot w-2 h-2 rounded-full bg-green-400 inline-block"></span>
+                <span class="text-green-400" id="stato-connessione">In diretta</span>
+            </div>
+        </div>
+
+        <div class="max-w-5xl mx-auto px-4 pb-3 flex gap-2 overflow-x-auto">
+            <button onclick="mostraSezione('risultati')" id="btn-risultati" class="nav-btn px-4 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap transition-colors bg-gray-800 text-gray-400">
+                ⚽ Risultati
+            </button>
+            <button onclick="mostraSezione('classifica')" id="btn-classifica" class="nav-btn px-4 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap transition-colors bg-gray-800 text-gray-400">
+                📊 Classifica
+            </button>
+            <button onclick="mostraSezione('marcatori')" id="btn-marcatori" class="nav-btn px-4 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap transition-colors bg-gray-800 text-gray-400">
+                🔪 Marcatori & Scalpi
+            </button>
+            <button onclick="mostraSezione('mvp')" id="btn-mvp" class="nav-btn px-4 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap transition-colors bg-gray-800 text-gray-400">
+                ⭐ MVP
+            </button>
+<button onclick="mostraSezione('squadre')" id="btn-squadre" class="nav-btn px-4 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap transition-colors bg-gray-800 text-gray-400">
+    🔵 Vuoti & Falli
+</button>
+        </div>
+    </header>
+
+    <main class="max-w-5xl mx-auto px-4 py-6">
+        <div id="contenuto" class="fade-in"></div>
+    </main>
+
+    <footer class="text-center text-gray-600 text-xs py-6">
+        24OdG Torneo Arbitri — aggiornamento automatico in tempo reale
+    </footer>
+
+    <script type="module">
+        import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0/+esm';
+
+        const SUPABASE_URL = 'https://ouvlmrfkouacqazitmwd.supabase.co';
+        const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im91dmxtcmZrb3VhY3Fheml0bXdkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEzOTcxNDcsImV4cCI6MjA3Njk3MzE0N30.1Yb01L3s17e9XvnOJCPtRNjLhshKnb5LSOdGz3omloA';
+        const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        let partite   = [];
+        let sezioneAttiva = 'risultati';
+
+        // ── Utilità ────────────────────────────────────────────────
+        const nomeGiocatore = (evento) =>
+            typeof evento === 'string' ? evento : (evento?.giocatore ?? '');
+
+        const minutoEvento = (evento) =>
+            typeof evento === 'object' && evento?.minuto ? evento.minuto : null;
+
+        // ── Caricamento dati ───────────────────────────────────────
+        async function carica() {
+            const { data, error } = await supabase
+                .from('partite').select('*')
+                .eq('completata', true)
+                .order('orario', { ascending: true })
+                .order('campo',  { ascending: true });
+
+            if (error) {
+                document.getElementById('stato-connessione').textContent = 'Errore connessione';
+                return;
+            }
+            partite = data || [];
+            render();
+        }
+
+        // ── Realtime ───────────────────────────────────────────────
+        supabase.channel('live-public')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'partite' }, carica)
+            .subscribe(status => {
+                const el = document.getElementById('stato-connessione');
+                el.textContent = status === 'SUBSCRIBED' ? 'In diretta' : 'Connessione...';
+            });
+
+        // ── Navigazione ────────────────────────────────────────────
+        window.mostraSezione = (s) => {
+            sezioneAttiva = s;
+            document.querySelectorAll('.nav-btn').forEach(b => {
+                b.classList.toggle('bg-cyan-600',  b.id === `btn-${s}`);
+                b.classList.toggle('text-white',   b.id === `btn-${s}`);
+                b.classList.toggle('bg-gray-800',  b.id !== `btn-${s}`);
+                b.classList.toggle('text-gray-400', b.id !== `btn-${s}`);
+            });
+            render();
+        };
+
+        // ── Render principale ──────────────────────────────────────
+        function render() {
+            const el = document.getElementById('contenuto');
+            el.className = 'fade-in';
+            void el.offsetWidth; // forza reflow per riattivare animazione
+
+            if      (sezioneAttiva === 'risultati')  el.innerHTML = renderRisultati();
+            else if (sezioneAttiva === 'classifica') el.innerHTML = renderClassifica();
+            else if (sezioneAttiva === 'marcatori')  el.innerHTML = renderMarcatori();
+            else if (sezioneAttiva === 'mvp')        el.innerHTML = renderMvp();
+            else if (sezioneAttiva === 'squadre')    el.innerHTML = renderSquadre();   // NUOVA
+        }
+
+        // ── SEZIONE: Risultati ─────────────────────────────────────
+        function renderRisultati() {
+            if (partite.length === 0)
+                return '<p class="text-center text-gray-500 py-16 text-lg">Nessuna partita completata ancora</p>';
+
+            const gruppi = {};
+            partite.forEach(p => {
+                const k = p.orario || 'Senza orario';
+                if (!gruppi[k]) gruppi[k] = [];
+                gruppi[k].push(p);
+            });
+
+            return Object.keys(gruppi).sort().map(orario => `
+                <div class="mb-8">
+                    <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">🕐 Orario ${orario}</h2>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        ${gruppi[orario].map(p => {
+                            const vincitore = p.punteggio_a > p.punteggio_b ? 'a' :
+                                              p.punteggio_b > p.punteggio_a ? 'b' : 'x';
+                            return `
+                            <div class="bg-gray-900 rounded-xl border border-gray-800 p-4">
+                                <div class="text-xs text-gray-500 mb-3">Campo ${p.campo} ${p.timer_tempo >= 3 ? `• <span class="text-yellow-500">${p.timer_tempo === 3 ? 'Silver Meta' : 'Golden Meta'}</span>` : ''}</div>
+                                <div class="flex items-center justify-between gap-3">
+                                    <div class="flex-1 text-right">
+                                        <div class="flex items-center justify-end gap-2">
+    <span class="font-bold ${vincitore === 'a' ? 'text-white text-lg' : 'text-gray-400'}">${p.squadra_a}</span>
+    <img src="${SUPABASE_URL}/storage/v1/object/public/loghi/${encodeURIComponent(p.squadra_a)}.png"
+         class="w-8 h-8 object-contain rounded" onerror="this.style.display='none'">
+</div>
+                                    </div>
+                                    <div class="flex items-center gap-2 text-2xl font-black font-mono">
+                                        <span class="${vincitore === 'a' ? 'text-cyan-400' : 'text-gray-300'}">${p.punteggio_a}</span>
+                                        <span class="text-gray-600 text-lg">-</span>
+                                        <span class="${vincitore === 'b' ? 'text-cyan-400' : 'text-gray-300'}">${p.punteggio_b}</span>
+                                    </div>
+                                    <div class="flex-1">
+                                        <div class="flex items-center gap-2">
+    <img src="${SUPABASE_URL}/storage/v1/object/public/loghi/${encodeURIComponent(p.squadra_b)}.png"
+         class="w-8 h-8 object-contain rounded" onerror="this.style.display='none'">
+    <span class="font-bold ${vincitore === 'b' ? 'text-white text-lg' : 'text-gray-400'}">${p.squadra_b}</span>
+</div>
+                                    </div>
+                                </div>
+                                ${(p.mvp_a || p.mvp_b) ? `
+                                    <div class="mt-3 pt-3 border-t border-gray-800 flex justify-between text-xs text-purple-400">
+                                        <span>${p.mvp_a ? `⭐ ${p.mvp_a}` : ''}</span>
+                                        <span>${p.mvp_b ? `⭐ ${p.mvp_b}` : ''}</span>
+                                    </div>
+                                ` : ''}
+                            </div>`;
+                        }).join('')}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // ── SEZIONE: Classifica ────────────────────────────────────
+        function renderClassifica() {
+            const cls = {};
+            partite.forEach(p => {
+                [[p.squadra_a, p.punti_a, p.punteggio_a, p.punteggio_b],
+                 [p.squadra_b, p.punti_b, p.punteggio_b, p.punteggio_a]].forEach(([sq, pt, gf, gs]) => {
+                    if (!cls[sq]) cls[sq] = { nome: sq, punti: 0, giocate: 0, vinte: 0, pareggiate: 0, perse: 0, gf: 0, gs: 0 };
+                    cls[sq].punti   += pt;
+                    cls[sq].giocate += 1;
+                    cls[sq].gf      += gf;
+                    cls[sq].gs      += gs;
+                    if (gf > gs) cls[sq].vinte++;
+                    else if (gf === gs) cls[sq].pareggiate++;
+                    else cls[sq].perse++;
+                });
+            });
+
+            const lista = Object.values(cls).sort((a, b) => {
+                if (b.punti !== a.punti) return b.punti - a.punti;
+                const da = a.gf - a.gs, db = b.gf - b.gs;
+                if (db !== da) return db - da;
+                return b.gf - a.gf;
+            });
+
+            if (lista.length === 0)
+                return '<p class="text-center text-gray-500 py-16">Nessun dato disponibile</p>';
+
+            const medaglie = ['🥇','🥈','🥉'];
+
+            return `
+                <div class="overflow-x-auto rounded-xl border border-gray-800">
+                    <table class="w-full text-sm">
+                        <thead class="bg-gray-900">
+                            <tr>
+                                ${['#','Squadra','Pt','G','V','N','P','GF','GS','DR'].map(h =>
+                                    `<th class="px-3 py-3 ${h === 'Squadra' ? 'text-left' : 'text-center'} text-gray-400 font-semibold text-xs uppercase">${h}</th>`
+                                ).join('')}
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-800">
+                            ${lista.map((s, i) => {
+                                const dr = s.gf - s.gs;
+                                return `
+                                <tr class="bg-gray-950 hover:bg-gray-900 transition-colors ${i < 3 ? 'bg-opacity-50' : ''}">
+                                    <td class="px-3 py-3 text-center text-lg">${medaglie[i] || `<span class="text-gray-500">${i+1}</span>`}</td>
+                                    <td class="px-3 py-3 font-semibold text-white">${s.nome}</td>
+                                    <td class="px-3 py-3 text-center font-black text-cyan-400 text-base">${s.punti}</td>
+                                    <td class="px-3 py-3 text-center text-gray-400">${s.giocate}</td>
+                                    <td class="px-3 py-3 text-center text-green-400">${s.vinte}</td>
+                                    <td class="px-3 py-3 text-center text-yellow-400">${s.pareggiate}</td>
+                                    <td class="px-3 py-3 text-center text-red-400">${s.perse}</td>
+                                    <td class="px-3 py-3 text-center text-gray-300">${s.gf}</td>
+                                    <td class="px-3 py-3 text-center text-gray-300">${s.gs}</td>
+                                    <td class="px-3 py-3 text-center font-semibold ${dr > 0 ? 'text-green-400' : dr < 0 ? 'text-red-400' : 'text-gray-500'}">${dr > 0 ? '+' : ''}${dr}</td>
+                                </tr>`;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>`;
+        }
+
+        // ── SEZIONE: Marcatori & Scalpi ────────────────────────────
+        function renderMarcatori() {
+            const gol = {}, scalpi = {};
+            partite.forEach(p => {
+                ['a','b'].forEach(sq => {
+                    const squadra = sq === 'a' ? p.squadra_a : p.squadra_b;
+                    (p[`gol_${sq}`] || []).forEach(ev => {
+                        const nome = nomeGiocatore(ev);
+                        if (!nome.includes('META')) {
+                            const k = `${nome}||${squadra}`;
+                            gol[k] = (gol[k] || 0) + 1;
+                        }
+                    });
+                    (p[`scalpi_${sq}`] || []).forEach(ev => {
+                        const nome = nomeGiocatore(ev);
+                        const k = `${nome}||${squadra}`;
+                        scalpi[k] = (scalpi[k] || 0) + 1;
+                    });
+                });
+            });
+
+            const listaGol    = Object.entries(gol).map(([k, n]) => { const [nome, sq] = k.split('||'); return { nome, squadra: sq, n }; }).sort((a,b) => b.n - a.n);
+            const listaScalpi = Object.entries(scalpi).map(([k, n]) => { const [nome, sq] = k.split('||'); return { nome, squadra: sq, n }; }).sort((a,b) => b.n - a.n);
+
+            const renderTabella = (lista, campo, colore, emoji) => {
+                if (lista.length === 0) return '<p class="text-gray-500 text-sm py-4">Nessun dato</p>';
+                return `<div class="space-y-2">
+                    ${lista.slice(0, 20).map((item, i) => `
+                        <div class="flex items-center justify-between bg-gray-900 rounded-lg px-4 py-3">
+                            <div class="flex items-center gap-3">
+                                <span class="text-lg ${i === 0 ? 'text-yellow-400' : i === 1 ? 'text-gray-300' : i === 2 ? 'text-orange-400' : 'text-gray-600'} font-bold w-5 text-center">${i < 3 ? ['🥇','🥈','🥉'][i] : i+1}</span>
+                                <div>
+                                    <div class="font-semibold text-white text-sm">${item.nome}</div>
+                                    <div class="text-xs text-gray-500">${item.squadra}</div>
+                                </div>
+                            </div>
+                            <span class="${colore} font-black text-lg">${item.n}</span>
+                        </div>
+                    `).join('')}
+                </div>`;
+            };
+
+            return `
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <h2 class="text-lg font-bold text-cyan-400 mb-4">⚽ Marcatori</h2>
+                        ${renderTabella(listaGol, 'gol', 'text-cyan-400', '⚽')}
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-bold text-red-400 mb-4">🔪 Scalpatori</h2>
+                        ${renderTabella(listaScalpi, 'scalpi', 'text-red-400', '🔪')}
+                    </div>
+                </div>`;
+        }
+
+        // ── SEZIONE: Vuoti & Falli di squadra ──────────────────────
+function renderSquadre() {
+    const vuoti = {}, falli = {}, giocate = {};
+    partite.forEach(p => {
+        [['a', p.squadra_a], ['b', p.squadra_b]].forEach(([sq, nome]) => {
+            giocate[nome] = (giocate[nome] || 0) + 1;
+            vuoti[nome]   = (vuoti[nome]   || 0) + (p[`vuoti_squadra_${sq}`]    || 0);
+            falli[nome]   = (falli[nome]   || 0) + (p[`falli_difesa_tot_${sq}`] || 0);
+        });
+    });
+
+    const classifica = (obj) => Object.entries(obj)
+        .filter(([, n]) => n > 0)
+        .map(([nome, n]) => ({ nome, n, partite: giocate[nome] || 0 }))
+        .sort((a, b) => b.n - a.n || a.partite - b.partite);
+
+    const renderTabella = (lista, colore) => {
+        if (lista.length === 0) return '<p class="text-gray-500 text-sm py-4">Nessun dato</p>';
+        return `<div class="space-y-2">
+            ${lista.map((item, i) => `
+                <div class="flex items-center justify-between bg-gray-900 rounded-lg px-4 py-3">
+                    <div class="flex items-center gap-3">
+                        <span class="text-lg ${i === 0 ? 'text-yellow-400' : i === 1 ? 'text-gray-300' : i === 2 ? 'text-orange-400' : 'text-gray-600'} font-bold w-5 text-center">${i < 3 ? ['🥇','🥈','🥉'][i] : i+1}</span>
+                        <img src="${SUPABASE_URL}/storage/v1/object/public/loghi/${encodeURIComponent(item.nome)}.png"
+                             class="w-8 h-8 object-contain rounded" onerror="this.style.display='none'">
+                        <div>
+                            <div class="font-semibold text-white text-sm">${item.nome}</div>
+                            <div class="text-xs text-gray-500">${item.partite} ${item.partite === 1 ? 'partita' : 'partite'} • media ${(item.n / item.partite).toFixed(1)}</div>
+                        </div>
+                    </div>
+                    <span class="${colore} font-black text-lg">${item.n}</span>
+                </div>
+            `).join('')}
+        </div>`;
+    };
+
+    return `
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+                <h2 class="text-lg font-bold text-blue-400 mb-4">🔵 Vuoti di squadra</h2>
+                ${renderTabella(classifica(vuoti), 'text-blue-400')}
+            </div>
+            <div>
+                <h2 class="text-lg font-bold text-orange-400 mb-4">⚠️ Falli di difesa</h2>
+                ${renderTabella(classifica(falli), 'text-orange-400')}
+            </div>
+        </div>`;
+}
+
+        // ── SEZIONE: MVP ───────────────────────────────────────────
+        function renderMvp() {
+            const mvps = {};
+            partite.forEach(p => {
+                ['a','b'].forEach(sq => {
+                    const mvp    = sq === 'a' ? p.mvp_a : p.mvp_b;
+                    const squadra = sq === 'a' ? p.squadra_a : p.squadra_b;
+                    if (mvp) {
+                        const k = `${mvp}||${squadra}`;
+                        mvps[k] = (mvps[k] || 0) + 1;
+                    }
+                });
+            });
+
+            const lista = Object.entries(mvps)
+                .map(([k, n]) => { const [nome, squadra] = k.split('||'); return { nome, squadra, n }; })
+                .sort((a, b) => b.n - a.n);
+
+            if (lista.length === 0)
+                return '<p class="text-center text-gray-500 py-16">Nessun MVP assegnato ancora</p>';
+
+            return `
+                <div class="max-w-lg mx-auto space-y-3">
+                    ${lista.map((item, i) => `
+                        <div class="flex items-center justify-between bg-gray-900 rounded-xl px-5 py-4 border border-gray-800">
+                            <div class="flex items-center gap-4">
+                                <span class="text-2xl">${i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `<span class="text-gray-500 font-bold">${i+1}</span>`}</span>
+                                <div>
+                                    <div class="font-bold text-white">${item.nome}</div>
+                                    <div class="text-xs text-gray-500">${item.squadra}</div>
+                                </div>
+                            </div>
+                            <div class="text-right">
+                                <div class="text-yellow-400 font-black text-xl">⭐ ${item.n}</div>
+                                <div class="text-xs text-gray-500">${item.n === 1 ? 'volta' : 'volte'}</div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>`;
+        }
+
+        // ── Avvio ──────────────────────────────────────────────────
+        mostraSezione('risultati');
+        carica();
+    </script>
+</body>
+</html>
