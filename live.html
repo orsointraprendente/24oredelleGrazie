@@ -230,7 +230,13 @@
                                 return `
                                 <tr class="bg-gray-950 hover:bg-gray-900 transition-colors ${i < 3 ? 'bg-opacity-50' : ''}">
                                     <td class="px-3 py-3 text-center text-lg">${medaglie[i] || `<span class="text-gray-500">${i+1}</span>`}</td>
-                                    <td class="px-3 py-3 font-semibold text-white">${s.nome}</td>
+                                    <td class="px-3 py-3 font-semibold text-white">
+    <div class="flex items-center gap-2">
+        <img src="${SUPABASE_URL}/storage/v1/object/public/loghi/${encodeURIComponent(s.nome)}.png"
+             class="w-6 h-6 object-contain rounded" onerror="this.style.display='none'">
+        <span>${s.nome}</span>
+    </div>
+</td>
                                     <td class="px-3 py-3 text-center font-black text-cyan-400 text-base">${s.punti}</td>
                                     <td class="px-3 py-3 text-center text-gray-400">${s.giocate}</td>
                                     <td class="px-3 py-3 text-center text-green-400">${s.vinte}</td>
