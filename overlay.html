@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="it">
 <head>
@@ -230,7 +231,7 @@
         if (!boxDebug) {
             boxDebug = document.createElement('pre');
             boxDebug.style.cssText = 'position:fixed;right:10px;top:10px;margin:0;padding:8px 10px;' +
-                'background:#000c;color:#0f0;font:14px monospace;max-width:45vw;white-space:pre-wrap;z-index:9';
+                'background:#000c;color:#0f0;font:14px monospace;max-width:60vw;max-height:90vh;overflow:auto;white-space:pre-wrap;z-index:9';
             document.body.appendChild(boxDebug);
         }
         boxDebug.textContent = msg;
@@ -258,6 +259,18 @@
                 if (error) throw error;
                 log(`campo=${campo}: ${data.length} partite lette, ` +
                     `${data.filter(p => !p.completata).length} non completate`);
+                if (debugOn === '2' && data.length > 1) {
+                    // Mostra solo i campi che cambiano tra una partita e l'altra:
+                    // quello che distingue la partita in corso dalle altre è lì.
+                    const escludi = ['id', 'squadra_a', 'squadra_b', 'orario', 'created_at'];
+                    const diversi = Object.keys(data[0]).filter(k => !escludi.includes(k) &&
+                        new Set(data.map(p => JSON.stringify(p[k]))).size > 1);
+                    const righe = data.map(p => `${p.squadra_a} - ${p.squadra_b}\n   ` +
+                        (diversi.length
+                            ? diversi.map(k => `${k}=${JSON.stringify(p[k]) ?? ''}`.slice(0, 50)).join('  ')
+                            : '(nessun campo differisce)')).join('\n');
+                    log(boxDebug.textContent + '\n\nCampi diversi tra le partite:\n' + righe);
+                }
                 scelta = data.find(p => !p.completata) || data[data.length - 1] || null;
             } else {
                 // Nessun parametro: mostra la partita più recente di qualunque campo
