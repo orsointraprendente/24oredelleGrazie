@@ -221,29 +221,60 @@
     }
 
     // ── Dati ───────────────────────────────────────────────────
+    // Con ?debug=1 compare un riquadro con lo stato del caricamento
+    const debugOn = params.get('debug');
+    let boxDebug = null;
+    function log(msg) {
+        console.log('[overlay]', msg);
+        if (!debugOn) return;
+        if (!boxDebug) {
+            boxDebug = document.createElement('pre');
+            boxDebug.style.cssText = 'position:fixed;right:10px;top:10px;margin:0;padding:8px 10px;' +
+                'background:#000c;color:#0f0;font:14px monospace;max-width:45vw;white-space:pre-wrap;z-index:9';
+            document.body.appendChild(boxDebug);
+        }
+        boxDebug.textContent = msg;
+    }
+
     async function carica() {
-        if (demo) {
-            disegna({ id: 'demo', squadra_a: 'Squadra Blu', squadra_b: 'Squadra Rossa',
-                      punteggio_a: 2, punteggio_b: 1, campo: 1, timer_tempo: 1 });
-            return;
-        }
+        try {
+            if (demo) {
+                log('Modalità demo');
+                disegna({ id: 'demo', squadra_a: 'Squadra Blu', squadra_b: 'Squadra Rossa',
+                          punteggio_a: 2, punteggio_b: 1, campo: 1, timer_tempo: 1 });
+                return;
+            }
 
-        if (idPartita) {
-            const { data } = await supabase.from('partite').select('*').eq('id', idPartita).maybeSingle();
-            disegna(data);
-            return;
-        }
+            let scelta = null;
 
-        if (campo) {
-            const { data } = await supabase.from('partite').select('*')
-                .eq('campo', campo).order('orario', { ascending: true });
-            if (!data || data.length === 0) { disegna(null); return; }
-            const inCorso = data.find(p => !p.completata);
-            disegna(inCorso || data[data.length - 1]);
-            return;
-        }
+            if (idPartita) {
+                const { data, error } = await supabase.from('partite').select('*').eq('id', idPartita).maybeSingle();
+                if (error) throw error;
+                scelta = data;
+                log(`partita=${idPartita}: ${data ? 'trovata' : 'NESSUNA riga (id sbagliato o lettura bloccata)'}`);
+            } else if (campo) {
+                const { data, error } = await supabase.from('partite').select('*')
+                    .eq('campo', campo).order('orario', { ascending: true });
+                if (error) throw error;
+                log(`campo=${campo}: ${data.length} partite lette, ` +
+                    `${data.filter(p => !p.completata).length} non completate`);
+                scelta = data.find(p => !p.completata) || data[data.length - 1] || null;
+            } else {
+                // Nessun parametro: mostra la partita più recente di qualunque campo
+                const { data, error } = await supabase.from('partite').select('*')
+                    .order('orario', { ascending: false }).limit(20);
+                if (error) throw error;
+                log(`nessun parametro: ${data.length} partite lette (usa ?campo=1 per sceglierne una)`);
+                scelta = data.find(p => !p.completata) || data[0] || null;
+            }
 
-        disegna(null); // nessun parametro: barra nascosta
+            if (scelta) log((boxDebug ? boxDebug.textContent : '') +
+                `\nMostro: ${scelta.squadra_a} ${scelta.punteggio_a}-${scelta.punteggio_b} ${scelta.squadra_b}` +
+                `\ncompletata=${scelta.completata}`);
+            disegna(scelta);
+        } catch (err) {
+            log('ERRORE: ' + (err.message || JSON.stringify(err)));
+        }
     }
 
     // Aggiornamento in tempo reale + rete di sicurezza ogni 5 secondi
@@ -256,3 +287,6 @@
 </script>
 </body>
 </html>
+
+
+
