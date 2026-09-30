@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>24OdG - Overlay punteggio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&display=swap" rel="stylesheet">
+<style>
+    :root {
+        --blu: #1545cd;
+        --rosso: #e51717;
+        --giallo: #fbc205;
+        --verde: #12b226;
+        --inchiostro: #10214f;
+    }
+    html, body {
+        margin: 0;
+        background: transparent;
+        overflow: hidden;
+        font-family: 'Barlow Condensed', 'Arial Narrow', Arial, sans-serif;
+    }
+
+    /* Posizione: bottom (default) oppure top con ?pos=top */
+    .wrap {
+        position: fixed;
+        left: 48px;
+        bottom: 48px;
+        opacity: 0;
+        transition: opacity .4s ease;
+    }
+    .wrap.top { bottom: auto; top: 48px; }
+    .wrap.visibile { opacity: 1; }
+
+    .bug {
+        display: inline-flex;
+        flex-direction: column;
+        filter: drop-shadow(0 4px 10px rgba(0, 0, 0, .35));
+    }
+
+    /* Banda tricolore del logo 24OdG */
+    .stripe {
+        height: 6px;
+        background: linear-gradient(90deg,
+            var(--blu) 0 25%, var(--rosso) 25% 50%,
+            var(--giallo) 50% 75%, var(--verde) 75% 100%);
+    }
+
+    .row { display: flex; align-items: stretch; background: #fff; }
+
+    .team {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 8px 20px;
+        min-width: 230px;
+        color: var(--inchiostro);
+        font-size: 38px;
+        font-weight: 700;
+        line-height: 1;
+    }
+    .team.a { justify-content: flex-end; text-align: right; }
+    .team.b { justify-content: flex-start; text-align: left; }
+    .team img { width: 52px; height: 52px; object-fit: contain; }
+
+    .score {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 0 22px;
+        background: var(--blu);
+        color: #fff;
+        font-size: 60px;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+    }
+    .score .sep { font-size: 36px; font-weight: 600; opacity: .7; }
+    .score .n { min-width: 34px; text-align: center; display: inline-block; }
+    .score .n.gol { animation: gol 1.6s ease; }
+
+    @keyframes gol {
+        0%   { transform: scale(1);    color: #fff; }
+        15%  { transform: scale(1.45); color: var(--giallo); }
+        60%  { transform: scale(1.15); color: var(--giallo); }
+        100% { transform: scale(1);    color: #fff; }
+    }
+
+    .meta {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 3px 20px;
+        background: var(--inchiostro);
+        color: #fff;
+        font-size: 20px;
+        font-weight: 600;
+    }
+    .meta .fase {
+        background: var(--giallo);
+        color: var(--inchiostro);
+        padding: 0 10px;
+        border-radius: 3px;
+        font-weight: 700;
+    }
+    .meta:empty { display: none; }
+
+    @media (prefers-reduced-motion: reduce) {
+        .score .n.gol { animation: none; color: var(--giallo); }
+        .wrap { transition: none; }
+    }
+</style>
+</head>
+<body>
+
+<div class="wrap" id="wrap">
+    <div class="bug">
+        <div class="stripe"></div>
+        <div class="row">
+            <div class="team a"><span id="nome-a"></span><img id="logo-a" alt=""></div>
+            <div class="score">
+                <span class="n" id="punti-a">0</span>
+                <span class="sep">-</span>
+                <span class="n" id="punti-b">0</span>
+            </div>
+            <div class="team b"><img id="logo-b" alt=""><span id="nome-b"></span></div>
+        </div>
+        <div class="meta" id="meta"></div>
+    </div>
+</div>
+
+<script type="module">
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0/+esm';
+
+    const SUPABASE_URL = 'https://axelfpfxtvnbvnzoqcwz.supabase.co';
+    const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4ZWxmcGZ4dHZuYnZuem9xY3d6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwOTUwODAsImV4cCI6MjEwNTY3MTA4MH0.4X0oVJCxTVAqvNFBui_MO_QvcMgdNzFmN9-Z3dTcg-o';
+    const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    // ── Parametri URL ──────────────────────────────────────────
+    //   ?partita=ID     -> una partita precisa
+    //   ?campo=N        -> la partita in corso sul campo N (o l'ultima giocata)
+    //   ?pos=top        -> barra in alto (default: in basso)
+    //   ?demo=1         -> dati finti per sistemare la grafica in OBS
+    const params  = new URLSearchParams(location.search);
+    const idPartita = params.get('partita');
+    const campo     = params.get('campo');
+    const demo      = params.get('demo');
+
+    if (params.get('pos') === 'top') document.getElementById('wrap').classList.add('top');
+
+    const el = {
+        wrap:  document.getElementById('wrap'),
+        nomeA: document.getElementById('nome-a'),
+        nomeB: document.getElementById('nome-b'),
+        logoA: document.getElementById('logo-a'),
+        logoB: document.getElementById('logo-b'),
+        puntiA: document.getElementById('punti-a'),
+        puntiB: document.getElementById('punti-b'),
+        meta:  document.getElementById('meta'),
+    };
+
+    let ultimo = { a: null, b: null, chiave: null };
+
+    // ── Utilità ────────────────────────────────────────────────
+    const urlLogo = (nome) =>
+        `${SUPABASE_URL}/storage/v1/object/public/loghi/${encodeURIComponent(nome)}.png`;
+
+    function impostaLogo(img, nome) {
+        img.style.display = '';
+        img.onerror = () => { img.style.display = 'none'; };
+        img.src = urlLogo(nome);
+    }
+
+    function lampeggia(nodo) {
+        nodo.classList.remove('gol');
+        void nodo.offsetWidth;
+        nodo.classList.add('gol');
+    }
+
+    // ── Disegno ────────────────────────────────────────────────
+    function disegna(p) {
+        if (!p) { el.wrap.classList.remove('visibile'); return; }
+
+        const chiave = `${p.id ?? ''}|${p.squadra_a}|${p.squadra_b}`;
+        const cambioPartita = chiave !== ultimo.chiave;
+
+        if (cambioPartita) {
+            el.nomeA.textContent = p.squadra_a;
+            el.nomeB.textContent = p.squadra_b;
+            impostaLogo(el.logoA, p.squadra_a);
+            impostaLogo(el.logoB, p.squadra_b);
+        }
+
+        const a = p.punteggio_a ?? 0;
+        const b = p.punteggio_b ?? 0;
+        el.puntiA.textContent = a;
+        el.puntiB.textContent = b;
+
+        // Animazione solo se il punteggio sale nella stessa partita
+        if (!cambioPartita) {
+            if (ultimo.a !== null && a > ultimo.a) lampeggia(el.puntiA);
+            if (ultimo.b !== null && b > ultimo.b) lampeggia(el.puntiB);
+        }
+
+        // Riga informativa: campo e fase (Silver/Golden Meta)
+        el.meta.innerHTML = '';
+        if (p.campo) {
+            const c = document.createElement('span');
+            c.textContent = `Campo ${p.campo}`;
+            el.meta.appendChild(c);
+        }
+        if (p.timer_tempo >= 3) {
+            const f = document.createElement('span');
+            f.className = 'fase';
+            f.textContent = p.timer_tempo === 3 ? 'Silver Meta' : 'Golden Meta';
+            el.meta.appendChild(f);
+        }
+
+        ultimo = { a, b, chiave };
+        el.wrap.classList.add('visibile');
+    }
+
+    // ── Dati ───────────────────────────────────────────────────
+    async function carica() {
+        if (demo) {
+            disegna({ id: 'demo', squadra_a: 'Squadra Blu', squadra_b: 'Squadra Rossa',
+                      punteggio_a: 2, punteggio_b: 1, campo: 1, timer_tempo: 1 });
+            return;
+        }
+
+        if (idPartita) {
+            const { data } = await supabase.from('partite').select('*').eq('id', idPartita).maybeSingle();
+            disegna(data);
+            return;
+        }
+
+        if (campo) {
+            const { data } = await supabase.from('partite').select('*')
+                .eq('campo', campo).order('orario', { ascending: true });
+            if (!data || data.length === 0) { disegna(null); return; }
+            const inCorso = data.find(p => !p.completata);
+            disegna(inCorso || data[data.length - 1]);
+            return;
+        }
+
+        disegna(null); // nessun parametro: barra nascosta
+    }
+
+    // Aggiornamento in tempo reale + rete di sicurezza ogni 5 secondi
+    supabase.channel('overlay-live')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'partite' }, carica)
+        .subscribe();
+    setInterval(carica, 5000);
+
+    carica();
+</script>
+</body>
+</html>
