@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>24OdG - Risultati a rotazione</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&display=swap" rel="stylesheet">
+<style>
+    :root {
+        --blu: #1545cd;
+        --rosso: #e51717;
+        --giallo: #fbc205;
+        --verde: #12b226;
+        --inchiostro: #10214f;
+    }
+    html, body {
+        margin: 0;
+        background: transparent;
+        overflow: hidden;
+        font-family: 'Barlow Condensed', 'Arial Narrow', Arial, sans-serif;
+    }
+
+    /* Default: in alto a sinistra (la barra principale sta in basso). ?pos=bottom per invertire */
+    .wrap {
+        position: fixed;
+        left: 48px;
+        top: 48px;
+        opacity: 0;
+        transition: opacity .35s ease;
+    }
+    .wrap.bottom { top: auto; bottom: 48px; }
+    .wrap.visibile { opacity: 1; }
+    .wrap.cambio { opacity: 0; }
+
+    .bug {
+        display: inline-flex;
+        flex-direction: column;
+        filter: drop-shadow(0 4px 10px rgba(0, 0, 0, .35));
+    }
+    .stripe {
+        height: 5px;
+        background: linear-gradient(90deg,
+            var(--blu) 0 25%, var(--rosso) 25% 50%,
+            var(--giallo) 50% 75%, var(--verde) 75% 100%);
+    }
+    .row { display: flex; align-items: stretch; background: #fff; }
+
+    .campo {
+        display: flex;
+        align-items: center;
+        padding: 0 16px;
+        background: var(--inchiostro);
+        color: #fff;
+        font-size: 26px;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+
+    .team {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 16px;
+        min-width: 190px;
+        color: var(--inchiostro);
+        font-size: 30px;
+        font-weight: 700;
+        line-height: 1;
+    }
+    .team.a { justify-content: flex-end; text-align: right; }
+    .team.b { justify-content: flex-start; text-align: left; }
+    .team img { width: 38px; height: 38px; object-fit: contain; }
+
+    .score {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 18px;
+        background: var(--blu);
+        color: #fff;
+        font-size: 42px;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+    }
+    .score .sep { font-size: 26px; font-weight: 600; opacity: .7; }
+
+    .stato {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 16px;
+        min-width: 96px;
+        background: #eef1f8;
+        color: var(--inchiostro);
+        font-size: 22px;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+    .stato .punto {
+        width: 12px; height: 12px; border-radius: 50%;
+        background: var(--verde);
+        animation: pulsa 1.4s ease-in-out infinite;
+    }
+    .stato.finale .punto, .stato.seguire .punto { display: none; }
+    @keyframes pulsa { 50% { opacity: .3; } }
+
+    @media (prefers-reduced-motion: reduce) {
+        .wrap { transition: none; }
+        .stato .punto { animation: none; }
+    }
+</style>
+</head>
+<body>
+
+<div class="wrap" id="wrap">
+    <div class="bug">
+        <div class="stripe"></div>
+        <div class="row">
+            <div class="campo" id="campo"></div>
+            <div class="team a"><span id="nome-a"></span><img id="logo-a" alt=""></div>
+            <div class="score">
+                <span id="punti-a">0</span><span class="sep">-</span><span id="punti-b">0</span>
+            </div>
+            <div class="team b"><img id="logo-b" alt=""><span id="nome-b"></span></div>
+            <div class="stato" id="stato"><span class="punto"></span><span id="stato-testo"></span></div>
+        </div>
+    </div>
+</div>
+
+<script type="module">
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0/+esm';
+
+    const SUPABASE_URL = 'https://axelfpfxtvnbvnzoqcwz.supabase.co';
+    const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4ZWxmcGZ4dHZuYnZuem9xY3d6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwOTUwODAsImV4cCI6MjEwNTY3MTA4MH0.4X0oVJCxTVAqvNFBui_MO_QvcMgdNzFmN9-Z3dTcg-o';
+    const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    // ── Parametri URL ──────────────────────────────────────────
+    //   ?ogni=6         secondi per ogni campo (default 6)
+    //   ?escludi=1,2    campi da saltare (es. quello già in onda con la barra principale)
+    //   ?pos=bottom     striscia in basso (default: in alto)
+    //   ?demo=1         dati finti per sistemare la grafica
+    const params  = new URLSearchParams(location.search);
+    const ogni    = Math.max(2, Number(params.get('ogni')) || 6);
+    const escludi = (params.get('escludi') || '').split(',').map(s => s.trim()).filter(Boolean);
+    const demo    = params.get('demo');
+
+    const wrap = document.getElementById('wrap');
+    if (params.get('pos') === 'bottom') wrap.classList.add('bottom');
+
+    const el = {
+        campo: document.getElementById('campo'),
+        nomeA: document.getElementById('nome-a'),
+        nomeB: document.getElementById('nome-b'),
+        logoA: document.getElementById('logo-a'),
+        logoB: document.getElementById('logo-b'),
+        puntiA: document.getElementById('punti-a'),
+        puntiB: document.getElementById('punti-b'),
+        stato: document.getElementById('stato'),
+        statoTesto: document.getElementById('stato-testo'),
+    };
+
+    let partite = [];
+    let indice = 0;
+    let campoCorrente = null;
+
+    // ── Utilità ────────────────────────────────────────────────
+    const urlLogo = (nome) =>
+        `${SUPABASE_URL}/storage/v1/object/public/loghi/${encodeURIComponent(nome)}.png`;
+
+    function impostaLogo(img, nome) {
+        img.style.display = '';
+        img.onerror = () => { img.style.display = 'none'; };
+        img.src = urlLogo(nome);
+    }
+
+    // Stessa logica dell'overlay principale: in gioco > in pausa > ultima finita > prossima
+    function scegliPartita(lista) {
+        const nonCompletate = lista.filter(p => !p.completata);
+        return nonCompletate.find(p => p.timer_attivo)
+            || nonCompletate.filter(p => p.timer_timestamp > 0)
+                   .sort((a, b) => b.timer_timestamp - a.timer_timestamp)[0]
+            || lista.filter(p => p.completata)
+                   .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))[0]
+            || nonCompletate[0]
+            || null;
+    }
+
+    // Una partita "rappresentativa" per ogni campo, in ordine di numero di campo
+    function partitePerCampo() {
+        const gruppi = {};
+        partite.forEach(p => { (gruppi[p.campo] = gruppi[p.campo] || []).push(p); });
+        return Object.keys(gruppi)
+            .filter(c => !escludi.includes(String(c)))
+            .sort((a, b) => Number(a) - Number(b))
+            .map(c => scegliPartita(gruppi[c]))
+            .filter(Boolean);
+    }
+
+    function riempi(p) {
+        campoCorrente = p.campo;
+        el.campo.textContent = `Campo ${p.campo}`;
+        el.nomeA.textContent = p.squadra_a;
+        el.nomeB.textContent = p.squadra_b;
+        impostaLogo(el.logoA, p.squadra_a);
+        impostaLogo(el.logoB, p.squadra_b);
+        el.puntiA.textContent = p.punteggio_a ?? 0;
+        el.puntiB.textContent = p.punteggio_b ?? 0;
+
+        let classe = 'seguire', testo = 'A seguire';
+        if (p.completata)                   { classe = 'finale';  testo = 'Finale'; }
+        else if (p.timer_attivo)            { classe = 'live';    testo = 'In corso'; }
+        else if (p.timer_timestamp > 0)     { classe = 'pausa';   testo = 'In pausa'; }
+        el.stato.className = `stato ${classe}`;
+        el.statoTesto.textContent = testo;
+    }
+
+    // ── Rotazione ──────────────────────────────────────────────
+    function prossimo() {
+        const lista = partitePerCampo();
+        if (lista.length === 0) { wrap.classList.remove('visibile'); return; }
+
+        const p = lista[indice % lista.length];
+        indice++;
+
+        wrap.classList.add('cambio');           // dissolvenza in uscita
+        setTimeout(() => {
+            riempi(p);
+            wrap.classList.add('visibile');
+            wrap.classList.remove('cambio');    // dissolvenza in entrata
+        }, 350);
+    }
+
+    // Tra un cambio e l'altro tiene aggiornato il punteggio del campo mostrato
+    function aggiornaCorrente() {
+        if (campoCorrente === null) return;
+        const p = partitePerCampo().find(x => String(x.campo) === String(campoCorrente));
+        if (p) riempi(p);
+    }
+
+    // ── Dati ───────────────────────────────────────────────────
+    async function carica() {
+        if (demo) {
+            partite = [
+                { campo: 1, squadra_a: 'Squadra Blu',   squadra_b: 'Squadra Rossa', punteggio_a: 2, punteggio_b: 1, timer_attivo: true },
+                { campo: 2, squadra_a: 'Squadra Verde', squadra_b: 'Squadra Gialla', punteggio_a: 0, punteggio_b: 0, completata: true },
+                { campo: 3, squadra_a: 'Squadra Nera',  squadra_b: 'Squadra Bianca', punteggio_a: 0, punteggio_b: 0 },
+            ];
+            return;
+        }
+        const { data, error } = await supabase.from('partite').select('*');
+        if (error) { console.error('[rotazione]', error); return; }
+        partite = data || [];
+    }
+
+    async function aggiorna() {
+        await carica();
+        aggiornaCorrente();
+    }
+
+    supabase.channel('rotazione-live')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'partite' }, aggiorna)
+        .subscribe();
+    setInterval(aggiorna, 5000);
+
+    await carica();
+    prossimo();
+    setInterval(prossimo, ogni * 1000);
+</script>
+</body>
+</html>
