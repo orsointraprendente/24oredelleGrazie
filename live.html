@@ -49,9 +49,9 @@
             <button onclick="mostraSezione('mvp')" id="btn-mvp" class="nav-btn px-4 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap transition-colors bg-gray-800 text-gray-400">
                 ⭐ MVP
             </button>
-<button onclick="mostraSezione('squadre')" id="btn-squadre" class="nav-btn px-4 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap transition-colors bg-gray-800 text-gray-400">
-    🔵 Vuoti & Falli
-</button>
+            <button onclick="mostraSezione('squadre')" id="btn-squadre" class="nav-btn px-4 py-1.5 rounded-full text-sm font-semibold whitespace-nowrap transition-colors bg-gray-800 text-gray-400">
+                🔵 Vuoti & Falli
+            </button>
         </div>
     </header>
 
@@ -70,8 +70,19 @@
         const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4ZWxmcGZ4dHZuYnZuem9xY3d6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwOTUwODAsImV4cCI6MjEwNTY3MTA4MH0.4X0oVJCxTVAqvNFBui_MO_QvcMgdNzFmN9-Z3dTcg-o';
         const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-        let partite   = [];
+        // Solo le colonne usate dalla pagina (prima si scaricava tutto con select('*'))
+        const COLONNE = [
+            'orario', 'campo', 'squadra_a', 'squadra_b',
+            'punteggio_a', 'punteggio_b', 'punti_a', 'punti_b', 'timer_tempo',
+            'mvp_a', 'mvp_b',
+            'gol_a', 'gol_b', 'scalpi_a', 'scalpi_b',
+            'vuoti_squadra_a', 'vuoti_squadra_b',
+            'falli_difesa_tot_a', 'falli_difesa_tot_b'
+        ].join(',');
+
+        let partite       = [];
         let sezioneAttiva = 'risultati';
+        let ultimaFirma   = '';   // per non ridisegnare se i dati non sono cambiati
 
         // ── Utilità ────────────────────────────────────────────────
         const nomeGiocatore = (evento) =>
@@ -80,10 +91,22 @@
         const minutoEvento = (evento) =>
             typeof evento === 'object' && evento?.minuto ? evento.minuto : null;
 
+        // Loghi: se un logo non esiste lo ricordiamo e non lo richiediamo più
+        const logoFallite = new Set();
+        window.logoKo = (img) => {
+            img.style.display = 'none';
+            logoFallite.add(decodeURIComponent(img.dataset.n));
+        };
+        const logo = (nome, classi) => {
+            if (logoFallite.has(nome)) return '';
+            return `<img src="${SUPABASE_URL}/storage/v1/object/public/loghi/${encodeURIComponent(nome)}.png"
+                         class="${classi}" data-n="${encodeURIComponent(nome)}" onerror="logoKo(this)">`;
+        };
+
         // ── Caricamento dati ───────────────────────────────────────
         async function carica() {
             const { data, error } = await supabase
-                .from('partite').select('*')
+                .from('partite').select(COLONNE)
                 .eq('completata', true)
                 .order('orario', { ascending: true })
                 .order('campo',  { ascending: true });
@@ -92,17 +115,42 @@
                 document.getElementById('stato-connessione').textContent = 'Errore connessione';
                 return;
             }
+
+            // Se non è cambiato nulla, niente ridisegno
+            const firma = JSON.stringify(data);
+            if (firma === ultimaFirma) return;
+            ultimaFirma = firma;
+
             partite = data || [];
             render();
         }
 
-        // ── Realtime ───────────────────────────────────────────────
+        // ── Aggiornamenti ──────────────────────────────────────────
+        // Prima ogni modifica a qualsiasi partita (anche in corso) faceva
+        // ricaricare tutto a tutti gli spettatori. Ora:
+        //  - si ricarica solo se cambia una partita completata (o ne viene cancellata una)
+        //  - con un piccolo ritardo casuale, per non far partire tutti insieme
+        //  - più eventi ravvicinati diventano un solo caricamento
+        let timerRicarica = null;
+        function pianificaRicarica() {
+            clearTimeout(timerRicarica);
+            timerRicarica = setTimeout(carica, 1000 + Math.random() * 3000);
+        }
+
         supabase.channel('live-public')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'partite' }, carica)
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'partite' }, (payload) => {
+                const nuova = payload.new || {};
+                if (payload.eventType === 'DELETE' || nuova.completata === true) pianificaRicarica();
+            })
             .subscribe(status => {
                 const el = document.getElementById('stato-connessione');
                 el.textContent = status === 'SUBSCRIBED' ? 'In diretta' : 'Connessione...';
             });
+
+        // Rete di sicurezza (es. una partita riaperta): ogni 60 s, solo se la scheda è visibile
+        setInterval(() => { if (!document.hidden) carica(); }, 60000);
+        // Quando torni sulla scheda, aggiorna subito
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) carica(); });
 
         // ── Navigazione ────────────────────────────────────────────
         window.mostraSezione = (s) => {
@@ -126,7 +174,7 @@
             else if (sezioneAttiva === 'classifica') el.innerHTML = renderClassifica();
             else if (sezioneAttiva === 'marcatori')  el.innerHTML = renderMarcatori();
             else if (sezioneAttiva === 'mvp')        el.innerHTML = renderMvp();
-            else if (sezioneAttiva === 'squadre')    el.innerHTML = renderSquadre();   // NUOVA
+            else if (sezioneAttiva === 'squadre')    el.innerHTML = renderSquadre();
         }
 
         // ── SEZIONE: Risultati ─────────────────────────────────────
@@ -154,10 +202,9 @@
                                 <div class="flex items-center justify-between gap-3">
                                     <div class="flex-1 text-right">
                                         <div class="flex items-center justify-end gap-2">
-    <span class="font-bold ${vincitore === 'a' ? 'text-white text-lg' : 'text-gray-400'}">${p.squadra_a}</span>
-    <img src="${SUPABASE_URL}/storage/v1/object/public/loghi/${encodeURIComponent(p.squadra_a)}.png"
-         class="w-8 h-8 object-contain rounded" onerror="this.style.display='none'">
-</div>
+                                            <span class="font-bold ${vincitore === 'a' ? 'text-white text-lg' : 'text-gray-400'}">${p.squadra_a}</span>
+                                            ${logo(p.squadra_a, 'w-8 h-8 object-contain rounded')}
+                                        </div>
                                     </div>
                                     <div class="flex items-center gap-2 text-2xl font-black font-mono">
                                         <span class="${vincitore === 'a' ? 'text-cyan-400' : 'text-gray-300'}">${p.punteggio_a}</span>
@@ -166,10 +213,9 @@
                                     </div>
                                     <div class="flex-1">
                                         <div class="flex items-center gap-2">
-    <img src="${SUPABASE_URL}/storage/v1/object/public/loghi/${encodeURIComponent(p.squadra_b)}.png"
-         class="w-8 h-8 object-contain rounded" onerror="this.style.display='none'">
-    <span class="font-bold ${vincitore === 'b' ? 'text-white text-lg' : 'text-gray-400'}">${p.squadra_b}</span>
-</div>
+                                            ${logo(p.squadra_b, 'w-8 h-8 object-contain rounded')}
+                                            <span class="font-bold ${vincitore === 'b' ? 'text-white text-lg' : 'text-gray-400'}">${p.squadra_b}</span>
+                                        </div>
                                     </div>
                                 </div>
                                 ${(p.mvp_a || p.mvp_b) ? `
@@ -231,12 +277,11 @@
                                 <tr class="bg-gray-950 hover:bg-gray-900 transition-colors ${i < 3 ? 'bg-opacity-50' : ''}">
                                     <td class="px-3 py-3 text-center text-lg">${medaglie[i] || `<span class="text-gray-500">${i+1}</span>`}</td>
                                     <td class="px-3 py-3 font-semibold text-white">
-    <div class="flex items-center gap-2">
-        <img src="${SUPABASE_URL}/storage/v1/object/public/loghi/${encodeURIComponent(s.nome)}.png"
-             class="w-6 h-6 object-contain rounded" onerror="this.style.display='none'">
-        <span>${s.nome}</span>
-    </div>
-</td>
+                                        <div class="flex items-center gap-2">
+                                            ${logo(s.nome, 'w-6 h-6 object-contain rounded')}
+                                            <span>${s.nome}</span>
+                                        </div>
+                                    </td>
                                     <td class="px-3 py-3 text-center font-black text-cyan-400 text-base">${s.punti}</td>
                                     <td class="px-3 py-3 text-center text-gray-400">${s.giocate}</td>
                                     <td class="px-3 py-3 text-center text-green-400">${s.vinte}</td>
@@ -308,60 +353,59 @@
         }
 
         // ── SEZIONE: Vuoti & Falli di squadra ──────────────────────
-function renderSquadre() {
-    const vuoti = {}, falli = {}, giocate = {};
-    partite.forEach(p => {
-        [['a', p.squadra_a], ['b', p.squadra_b]].forEach(([sq, nome]) => {
-            giocate[nome] = (giocate[nome] || 0) + 1;
-            vuoti[nome]   = (vuoti[nome]   || 0) + (p[`vuoti_squadra_${sq}`]    || 0);
-            falli[nome]   = (falli[nome]   || 0) + (p[`falli_difesa_tot_${sq}`] || 0);
-        });
-    });
+        function renderSquadre() {
+            const vuoti = {}, falli = {}, giocate = {};
+            partite.forEach(p => {
+                [['a', p.squadra_a], ['b', p.squadra_b]].forEach(([sq, nome]) => {
+                    giocate[nome] = (giocate[nome] || 0) + 1;
+                    vuoti[nome]   = (vuoti[nome]   || 0) + (p[`vuoti_squadra_${sq}`]    || 0);
+                    falli[nome]   = (falli[nome]   || 0) + (p[`falli_difesa_tot_${sq}`] || 0);
+                });
+            });
 
-    const classifica = (obj) => Object.entries(obj)
-        .filter(([, n]) => n > 0)
-        .map(([nome, n]) => ({ nome, n, partite: giocate[nome] || 0 }))
-        .sort((a, b) => b.n - a.n || a.partite - b.partite);
+            const classifica = (obj) => Object.entries(obj)
+                .filter(([, n]) => n > 0)
+                .map(([nome, n]) => ({ nome, n, partite: giocate[nome] || 0 }))
+                .sort((a, b) => b.n - a.n || a.partite - b.partite);
 
-    const renderTabella = (lista, colore) => {
-        if (lista.length === 0) return '<p class="text-gray-500 text-sm py-4">Nessun dato</p>';
-        return `<div class="space-y-2">
-            ${lista.map((item, i) => `
-                <div class="flex items-center justify-between bg-gray-900 rounded-lg px-4 py-3">
-                    <div class="flex items-center gap-3">
-                        <span class="text-lg ${i === 0 ? 'text-yellow-400' : i === 1 ? 'text-gray-300' : i === 2 ? 'text-orange-400' : 'text-gray-600'} font-bold w-5 text-center">${i < 3 ? ['🥇','🥈','🥉'][i] : i+1}</span>
-                        <img src="${SUPABASE_URL}/storage/v1/object/public/loghi/${encodeURIComponent(item.nome)}.png"
-                             class="w-8 h-8 object-contain rounded" onerror="this.style.display='none'">
-                        <div>
-                            <div class="font-semibold text-white text-sm">${item.nome}</div>
-                            <div class="text-xs text-gray-500">${item.partite} ${item.partite === 1 ? 'partita' : 'partite'} • media ${(item.n / item.partite).toFixed(1)}</div>
+            const renderTabella = (lista, colore) => {
+                if (lista.length === 0) return '<p class="text-gray-500 text-sm py-4">Nessun dato</p>';
+                return `<div class="space-y-2">
+                    ${lista.map((item, i) => `
+                        <div class="flex items-center justify-between bg-gray-900 rounded-lg px-4 py-3">
+                            <div class="flex items-center gap-3">
+                                <span class="text-lg ${i === 0 ? 'text-yellow-400' : i === 1 ? 'text-gray-300' : i === 2 ? 'text-orange-400' : 'text-gray-600'} font-bold w-5 text-center">${i < 3 ? ['🥇','🥈','🥉'][i] : i+1}</span>
+                                ${logo(item.nome, 'w-8 h-8 object-contain rounded')}
+                                <div>
+                                    <div class="font-semibold text-white text-sm">${item.nome}</div>
+                                    <div class="text-xs text-gray-500">${item.partite} ${item.partite === 1 ? 'partita' : 'partite'} • media ${(item.n / item.partite).toFixed(1)}</div>
+                                </div>
+                            </div>
+                            <span class="${colore} font-black text-lg">${item.n}</span>
                         </div>
-                    </div>
-                    <span class="${colore} font-black text-lg">${item.n}</span>
-                </div>
-            `).join('')}
-        </div>`;
-    };
+                    `).join('')}
+                </div>`;
+            };
 
-    return `
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-                <h2 class="text-lg font-bold text-blue-400 mb-4">🔵 Vuoti di squadra</h2>
-                ${renderTabella(classifica(vuoti), 'text-blue-400')}
-            </div>
-            <div>
-                <h2 class="text-lg font-bold text-orange-400 mb-4">⚠️ Falli di difesa</h2>
-                ${renderTabella(classifica(falli), 'text-orange-400')}
-            </div>
-        </div>`;
-}
+            return `
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <h2 class="text-lg font-bold text-blue-400 mb-4">🔵 Vuoti di squadra</h2>
+                        ${renderTabella(classifica(vuoti), 'text-blue-400')}
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-bold text-orange-400 mb-4">⚠️ Falli di difesa</h2>
+                        ${renderTabella(classifica(falli), 'text-orange-400')}
+                    </div>
+                </div>`;
+        }
 
         // ── SEZIONE: MVP ───────────────────────────────────────────
         function renderMvp() {
             const mvps = {};
             partite.forEach(p => {
                 ['a','b'].forEach(sq => {
-                    const mvp    = sq === 'a' ? p.mvp_a : p.mvp_b;
+                    const mvp     = sq === 'a' ? p.mvp_a : p.mvp_b;
                     const squadra = sq === 'a' ? p.squadra_a : p.squadra_b;
                     if (mvp) {
                         const k = `${mvp}||${squadra}`;
