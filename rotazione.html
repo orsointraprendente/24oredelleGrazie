@@ -249,7 +249,7 @@
             ];
             return;
         }
-        const { data, error } = await supabase.from('partite').select('*');
+        const { data, error } = await supabase.from('partite').select('campo,squadra_a,squadra_b,punteggio_a,punteggio_b,completata,timer_attivo,timer_timestamp,updated_at');
         if (error) { console.error('[rotazione]', error); return; }
         partite = data || [];
     }
@@ -259,10 +259,13 @@
         aggiornaCorrente();
     }
 
+    // Aggiorna al massimo una volta ogni 1,5 s anche se arrivano molti eventi
+    let _t = null;
+    const aggiornaSoft = (fn) => () => { clearTimeout(_t); _t = setTimeout(fn, 1500); };
     supabase.channel('rotazione-live')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'partite' }, aggiorna)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'partite' }, aggiornaSoft(aggiorna))
         .subscribe();
-    setInterval(aggiorna, 5000);
+    setInterval(aggiorna, 30000); // rete di sicurezza: il tempo reale fa il lavoro vero
 
     await carica();
     prossimo();
