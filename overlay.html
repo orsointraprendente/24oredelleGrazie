@@ -135,6 +135,7 @@
     const SUPABASE_URL = 'https://axelfpfxtvnbvnzoqcwz.supabase.co';
     const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4ZWxmcGZ4dHZuYnZuem9xY3d6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwOTUwODAsImV4cCI6MjEwNTY3MTA4MH0.4X0oVJCxTVAqvNFBui_MO_QvcMgdNzFmN9-Z3dTcg-o';
     const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+    const COLONNE = 'campo,orario,squadra_a,squadra_b,punteggio_a,punteggio_b,completata,timer_attivo,timer_timestamp,timer_tempo,updated_at'; // solo i campi che servono: meno traffico
 
     // ── Parametri URL ──────────────────────────────────────────
     //   ?partita=ID     -> una partita precisa
@@ -264,12 +265,12 @@
             let scelta = null;
 
             if (idPartita) {
-                const { data, error } = await supabase.from('partite').select('*').eq('id', idPartita).maybeSingle();
+                const { data, error } = await supabase.from('partite').select(COLONNE).eq('id', idPartita).maybeSingle();
                 if (error) throw error;
                 scelta = data;
                 log(`partita=${idPartita}: ${data ? 'trovata' : 'NESSUNA riga (id sbagliato o lettura bloccata)'}`);
             } else if (campo) {
-                const { data, error } = await supabase.from('partite').select('*')
+                const { data, error } = await supabase.from('partite').select(COLONNE)
                     .eq('campo', campo).order('orario', { ascending: true });
                 if (error) throw error;
                 log(`campo=${campo}: ${data.length} partite lette, ` +
@@ -289,7 +290,7 @@
                 scelta = scegliPartita(data);
             } else {
                 // Nessun parametro: mostra la partita più recente di qualunque campo
-                const { data, error } = await supabase.from('partite').select('*')
+                const { data, error } = await supabase.from('partite').select(COLONNE)
                     .order('orario', { ascending: false }).limit(20);
                 if (error) throw error;
                 log(`nessun parametro: ${data.length} partite lette (usa ?campo=1 per sceglierne una)`);
@@ -306,14 +307,15 @@
     }
 
     // Aggiornamento in tempo reale + rete di sicurezza ogni 5 secondi
+    // Aggiorna al massimo una volta ogni 1,5 s anche se arrivano molti eventi
+    let _t = null;
+    const aggiornaSoft = (fn) => () => { clearTimeout(_t); _t = setTimeout(fn, 1500); };
     supabase.channel('overlay-live')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'partite' }, carica)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'partite' }, aggiornaSoft(carica))
         .subscribe();
-    setInterval(carica, 5000);
+    setInterval(carica, 30000); // rete di sicurezza: il tempo reale fa il lavoro vero
 
     carica();
 </script>
 </body>
 </html>
-
-
